@@ -518,6 +518,11 @@ export class JcodeClient extends EventEmitter {
     await accepted;
   }
 
+  /** Submit a hidden recovery continuation without awaiting message acceptance. */
+  async sendSystemReminder(sessionId: string, reminder: string): Promise<void> {
+    this.notify({ req: "send_message", session_id: sessionId, content: "", system_reminder: reminder });
+  }
+
   /** Write a request without expecting a request-level reply. */
   notify(request: ApiRequest): void {
     if (this.closed) throw this.closeError ?? new Error("client closed");
@@ -661,6 +666,11 @@ export class JcodeClient extends EventEmitter {
 
   async clearApiKey(provider: string): Promise<void> {
     await this.expectReply({ req: "clear_api_key", provider }, "credential_updated");
+  }
+
+  /** Reload credentials saved by an out-of-band OAuth login. No secrets or chat messages. */
+  async notifyAuthChanged(provider: string): Promise<void> {
+    await this.expectReply({ req: "notify_auth_changed", provider }, "ok");
   }
 
   async readFile(sessionId: string, path: string, maxBytes?: number): Promise<FileContent> {

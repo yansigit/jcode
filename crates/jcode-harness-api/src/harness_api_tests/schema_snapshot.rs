@@ -3,6 +3,34 @@
 use crate::*;
 
 #[test]
+fn token_usage_preserves_cache_creation_and_accepts_legacy_frames() {
+    let legacy = r#"{"v":1,"ev":"token_usage","session_id":"s1","input":10,"output":5,"cache_read_input":2}"#;
+    let legacy_frame: ServerFrame = serde_json::from_str(legacy).unwrap();
+    assert!(matches!(
+        &legacy_frame.event,
+        ApiEvent::TokenUsage {
+            cache_creation_input: None,
+            ..
+        }
+    ));
+    assert_eq!(serde_json::to_string(&legacy_frame).unwrap(), legacy);
+
+    for cache_creation_input in [Some(0), Some(42)] {
+        let frame = ServerFrame::event(ApiEvent::TokenUsage {
+            session_id: "s1".into(),
+            input: 10,
+            output: 5,
+            cache_read_input: Some(2),
+            cache_creation_input,
+        });
+        let wire = serde_json::to_value(&frame).unwrap();
+        assert_eq!(wire["cache_creation_input"], cache_creation_input.unwrap());
+        let decoded: ServerFrame = serde_json::from_value(wire).unwrap();
+        assert_eq!(decoded.event, frame.event);
+    }
+}
+
+#[test]
 fn client_frame_wire_shape() {
     let frame = ClientFrame::new(
         7,
@@ -10,6 +38,7 @@ fn client_frame_wire_shape() {
             session_id: "s1".into(),
             content: "hi".into(),
             images: vec![],
+            system_reminder: None,
             no_reply: false,
         },
     );
@@ -28,6 +57,7 @@ fn send_message_no_reply_wire_shape_and_legacy_default() {
             session_id: "s1".into(),
             content: "context".into(),
             images: vec![],
+            system_reminder: None,
             no_reply: true,
         },
     );
@@ -44,6 +74,7 @@ fn send_message_no_reply_wire_shape_and_legacy_default() {
     assert!(matches!(
         legacy.request,
         ApiRequest::SendMessage {
+            system_reminder: None,
             no_reply: false,
             ..
         }
@@ -418,4 +449,55 @@ fn snake_case(name: &str) -> String {
         }
     }
     out
+}
+
+#[test]
+fn session_recovery_wire_shape_roundtrips_optional_notice() {
+    for reconnect_notice in [None, Some("reconnected".into())] {
+        let frame = ServerFrame::event(ApiEvent::SessionRecovery {
+            session_id: "s1".into(),
+            continuation_message: "continue task".into(),
+            reconnect_notice: reconnect_notice.clone(),
+        });
+        let wire = serde_json::to_value(&frame).unwrap();
+        assert_eq!(wire["ev"], "session_recovery");
+        assert_eq!(wire["session_id"], "s1");
+        assert_eq!(wire["continuation_message"], "continue task");
+        assert_eq!(
+            wire.get("reconnect_notice").is_some(),
+            reconnect_notice.is_some()
+        );
+        assert!(wire.get("reply_to").is_none());
+        assert_eq!(serde_json::from_value::<ServerFrame>(wire).unwrap(), frame);
+    }
+}
+
+#[test]
+fn hidden_system_reminder_wire_shape_and_legacy_default() {
+    let frame = ClientFrame::new(
+        12,
+        ApiRequest::SendMessage {
+            session_id: "s1".into(),
+            content: String::new(),
+            system_reminder: Some("continue task".into()),
+            images: vec![],
+            no_reply: false,
+        },
+    );
+    let wire = serde_json::to_value(&frame).unwrap();
+    assert_eq!(wire["content"], "");
+    assert_eq!(wire["system_reminder"], "continue task");
+    assert!(wire.get("no_reply").is_none());
+    assert_eq!(serde_json::from_value::<ClientFrame>(wire).unwrap(), frame);
+    let legacy: ClientFrame = serde_json::from_str(
+        r#"{"v":1,"id":13,"req":"send_message","session_id":"s1","content":"hello"}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        legacy.request,
+        ApiRequest::SendMessage {
+            system_reminder: None,
+            ..
+        }
+    ));
 }

@@ -19,11 +19,16 @@ mod client;
 mod events;
 mod requests;
 mod sockets;
+mod swarm_metadata;
 
 pub use client::{FrameError, HarnessClient, read_frame, write_frame};
 pub use events::*;
+pub use jcode_usage_types::{ModelUsage, compare_model_usage};
 pub use requests::*;
 pub use sockets::{api_socket_path, legacy_socket_path, runtime_dir};
+pub use swarm_metadata::{
+    enrich_sessions_from_local_swarm_state, enrich_sessions_from_swarm_state,
+};
 
 #[cfg(test)]
 #[path = "harness_api_tests/schema_snapshot.rs"]
@@ -36,7 +41,7 @@ mod capability_coverage_tests;
 /// Protocol major version. Breaking changes only.
 pub const API_VERSION_MAJOR: u32 = 1;
 /// Protocol minor version. Additive changes.
-pub const API_VERSION_MINOR: u32 = 0;
+pub const API_VERSION_MINOR: u32 = 3;
 
 /// Envelope wrapping every client-to-server frame.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

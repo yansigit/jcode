@@ -56,6 +56,9 @@ pub enum ApiRequest {
     SendMessage {
         session_id: String,
         content: String,
+        /// Hidden recovery/context instruction, not a user transcript message.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        system_reminder: Option<String>,
         /// (media_type, base64_data) pairs.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<(String, String)>,
@@ -128,6 +131,10 @@ pub enum ApiRequest {
 
     /// Remove a previously persisted API-key credential.
     ClearApiKey { provider: String },
+
+    /// Reload provider credentials already saved outside the harness (e.g. OAuth).
+    /// No tokens or callback input travel in this request.
+    NotifyAuthChanged { provider: String },
 
     /// Read one UTF-8 file under the session working directory.
     ReadFile {

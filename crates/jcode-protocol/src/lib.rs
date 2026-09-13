@@ -50,6 +50,8 @@ pub enum CommDeliveryMode {
 /// A message in conversation history (for sync)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryMessage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_stats: Option<jcode_session_types::ResponseStats>,
     pub role: String,
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -579,7 +581,7 @@ impl Request {
             Request::ClientDebugResponse { id, .. } => *id,
             Request::Subscribe { id, .. } | Request::PrepareDisconnect { id } => *id,
             Request::GetHistory { id } => *id,
-            Request::GetModelCatalog { id } => *id,
+            Request::GetModelCatalog { id, .. } => *id,
             Request::GetCompactedHistory { id, .. } => *id,
             Request::Reload { id, .. } => *id,
             Request::ResumeSession { id, .. } => *id,

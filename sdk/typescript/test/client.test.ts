@@ -366,6 +366,9 @@ test("GA methods send stable request shapes and map typed replies", async () => 
         case "clear_api_key":
           reply({ ev: "credential_updated", provider: "jcode", configured: false });
           break;
+        case "notify_auth_changed":
+          reply({ ev: "ok" });
+          break;
         case "read_file":
           reply({
             ev: "file_content",
@@ -416,6 +419,7 @@ test("GA methods send stable request shapes and map typed replies", async () => 
 
     await client.setApiKey("gemini-api", "secret");
     await client.clearApiKey("jcode");
+    await client.notifyAuthChanged("openai");
     assert.deepEqual(await client.readFile("s1", "src/a.ts", 5), {
       path: "src/a.ts",
       content: "hello",
@@ -599,6 +603,54 @@ test("globalEvents explicitly rejects custom transports", async () => {
     );
   } finally {
     await client.close();
+    await server.close();
+  }
+});
+
+test("session recovery events are typed, buffered, and filtered by session", async () => {
+  const server = await startMockHarness();
+  const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  const stream = client.events("mine");
+  const all = client.events();
+  try {
+    for (const session_id of ["other", "mine"]) {
+      server.broadcast({ v: 1, ev: "session_recovery", session_id,
+        continuation_message: "continue task", reconnect_notice: "reconnected" });
+    }
+    const event = (await stream.next()).value;
+    assert.equal(event?.ev, "session_recovery");
+    if (event?.ev === "session_recovery") {
+      assert.equal(event.session_id, "mine");
+      assert.equal(event.continuation_message, "continue task");
+      assert.equal(event.reconnect_notice, "reconnected");
+    }
+    for (const expected of ["other", "mine"]) {
+      const event = (await all.next()).value;
+      assert.ok(event?.ev === "session_recovery");
+      assert.equal(event.session_id, expected);
+    }
+  } finally {
+    await stream.return();
+    await all.return();
+    client.close();
+    await server.close();
+  }
+});
+
+test("sendSystemReminder writes hidden content without waiting for acceptance", async () => {
+  const requests: any[] = [];
+  const server = await startMockHarness({ onRequest(request) { requests.push(request); } });
+  const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  try {
+    await client.sendSystemReminder("mine", "continue task");
+    await waitFor(() => requests.length === 1);
+    assert.equal(requests[0].req, "send_message");
+    assert.equal(requests[0].session_id, "mine");
+    assert.equal(requests[0].content, "");
+    assert.equal(requests[0].system_reminder, "continue task");
+    assert.notEqual(requests[0].no_reply, true);
+  } finally {
+    client.close();
     await server.close();
   }
 });

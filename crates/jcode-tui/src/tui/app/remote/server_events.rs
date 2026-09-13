@@ -403,6 +403,7 @@ mod history_dedup_tests {
 
     fn message(role: &str, content: &str) -> HistoryMessage {
         HistoryMessage {
+            response_stats: None,
             role: role.to_string(),
             content: content.to_string(),
             tool_calls: None,
@@ -412,6 +413,7 @@ mod history_dedup_tests {
 
     fn image(data: &str) -> RenderedImage {
         RenderedImage {
+            history_message_index: None,
             media_type: "image/png".to_string(),
             data: data.to_string(),
             label: None,
@@ -1223,8 +1225,9 @@ pub(in crate::tui::app) fn handle_server_event(
             // queue and re-adopt the running-turn state so the queue
             // dispatches once the real turn completes.
             if message == "Already processing a message"
-                && recover_undelivered_queued_continuation(app, "server busy rejection")
+                && recover_rejected_queued_continuation(app)
             {
+                remote.clear_pending();
                 app.is_processing = true;
                 app.status = ProcessingStatus::Thinking(Instant::now());
                 app.current_message_id = None;
@@ -1616,9 +1619,19 @@ pub(in crate::tui::app) fn handle_server_event(
             crate::set_current_session(&session_id);
             app.note_client_focus(true);
             let session_changed = prev_session_id.as_deref() != Some(session_id.as_str());
+            // The initial Subscribe snapshot predates an early startup Message
+            // sent on the same ordered connection. Adopting its session id must
+            // not make that in-flight request idle or discard its retry payload.
+            // An actual session switch must still reset the old session's state.
+            let preserve_startup_send = prev_session_id.is_none()
+                && !remote.has_loaded_history()
+                && app.pending_startup_prompt_echo.is_some()
+                && app.current_message_id.is_some();
 
             if session_changed {
-                app.rate_limit_pending_message = None;
+                if !preserve_startup_send {
+                    app.rate_limit_pending_message = None;
+                }
                 app.rate_limit_reset = None;
                 app.connection_type = None;
                 app.status_detail = None;
@@ -1647,16 +1660,18 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.kv_cache.kv_cache_turn_number = None;
                 app.kv_cache.kv_cache_turn_call_index = 0;
                 app.kv_cache.kv_cache_miss_samples.clear();
-                app.processing_started = None;
-                app.clear_visible_turn_started();
+                if !preserve_startup_send {
+                    app.processing_started = None;
+                    app.clear_visible_turn_started();
+                    app.last_stream_activity = None;
+                    app.is_processing = false;
+                    app.status = ProcessingStatus::Idle;
+                }
                 app.replay_processing_started_ms = None;
                 app.replay_elapsed_override = None;
                 app.reset_streaming_tps();
-                app.last_stream_activity = None;
                 app.stream_message_ended = false;
                 app.remote_resume_activity = None;
-                app.is_processing = false;
-                app.status = ProcessingStatus::Idle;
                 app.follow_chat_bottom();
                 if prev_session_id.is_some() {
                     app.queued_messages.clear();
@@ -2282,6 +2297,16 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.set_status_notice(format!("Model → {}", model));
             }
             false
+        }
+        ServerEvent::ModelUsageUpdated { route } => {
+            for cached in &mut app.remote_model_options {
+                if cached.model == route.model && cached.provider == route.provider
+                    && cached.api_method == route.api_method {
+                    cached.usage = route.usage.clone();
+                }
+            }
+            app.invalidate_model_picker_cache();
+            true
         }
         ServerEvent::AvailableModelsUpdated {
             provider_name,

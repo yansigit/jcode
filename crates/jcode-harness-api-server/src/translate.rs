@@ -129,6 +129,10 @@ pub struct BridgeState {
     pending_attach_id: Option<(u64, u64, Option<String>)>,
     /// Subscribe errors can arrive before the correlated state response.
     pending_attach_subscribe_id: Option<u64>,
+    /// Subscribe history may arrive before or after the correlated state reply.
+    /// Keep its correlation independently, and consume even non-recovery history
+    /// so duplicates cannot later inject a continuation into a completed turn.
+    pending_recovery_history: Option<(u64, Option<String>)>,
     /// Legacy and API ids for an in-flight session fork.
     pending_fork_id: Option<(u64, u64)>,
     /// Legacy id of the unsolicited model-catalog probe sent after attach. Its
@@ -163,6 +167,8 @@ pub struct BridgeState {
     /// carry it without a round trip.
     current_effort: Option<String>,
     available_routes: Vec<ModelRouteInfo>,
+    /// Deltas can precede the first catalog or a delayed snapshot reply.
+    model_usage_updates: BTreeMap<(String, String, String), jcode_harness_api::ModelUsage>,
 }
 
 impl BridgeState {
@@ -417,6 +423,7 @@ impl BridgeState {
                 let requested_session = (req == "attach_session")
                     .then(|| request["session_id"].as_str().map(str::to_string))
                     .flatten();
+                self.pending_recovery_history = Some((id, requested_session.clone()));
                 self.pending_attach_id = Some((state_id, api_id, requested_session));
                 self.pending_attach_subscribe_id = Some(id);
                 self.pending_model_probe = Some(catalog_id);
@@ -463,7 +470,7 @@ impl BridgeState {
                 vec![
                     Outbound::Legacy(subscribe),
                     Outbound::Legacy(json!({"type": "state", "id": state_id})),
-                    Outbound::Legacy(json!({"type": "get_model_catalog", "id": catalog_id})),
+                    Outbound::Legacy(json!({"type": "get_model_catalog", "id": catalog_id, "subscribe_usage_updates": true})),
                 ]
             }
             "send_message" => {
@@ -481,6 +488,9 @@ impl BridgeState {
                 });
                 if no_reply {
                     message["no_reply"] = json!(true);
+                }
+                if let Some(reminder) = request["system_reminder"].as_str() {
+                    message["system_reminder"] = json!(reminder);
                 }
                 if let Some(images) = request["images"].as_array()
                     && !images.is_empty()
@@ -635,12 +645,15 @@ impl BridgeState {
                     }
                 }
                 let include_archived = request["include_archived"].as_bool().unwrap_or(false);
-                let sessions: Vec<_> = ids
+                let mut sessions: Vec<_> = ids
                     .into_iter()
                     .filter(|session_id| {
                         include_archived || !archive.sessions.contains_key(session_id)
                     })
                     .map(|session_id| SessionInfo {
+                        parent_session_id: None,
+                        agent_label: None,
+                        swarm_status: None,
                         working_dir: self.session_dirs.get(&session_id).cloned(),
                         title: metadata
                             .get(&session_id)
@@ -666,6 +679,7 @@ impl BridgeState {
                         session_id,
                     })
                     .collect();
+                jcode_harness_api::enrich_sessions_from_local_swarm_state(&mut sessions);
                 let completed = list_started.elapsed();
                 eprintln!(
                     "harness API bridge: list_sessions ids={:.1}ms metadata={:.1}ms total={:.1}ms count={}",
@@ -691,7 +705,7 @@ impl BridgeState {
                     let id = self.legacy_id();
                     self.pending_simple.push((id, api_id, SimpleKind::Models));
                     return vec![Outbound::Legacy(
-                        json!({"type": "get_model_catalog", "id": id}),
+                        json!({"type": "get_model_catalog", "id": id, "subscribe_usage_updates": true}),
                     )];
                 }
                 vec![Outbound::Reply(ServerFrame::reply(
@@ -709,13 +723,33 @@ impl BridgeState {
                     self.pending_simple
                         .push((id, api_id, SimpleKind::RuntimeInfo));
                     return vec![Outbound::Legacy(
-                        json!({"type": "get_model_catalog", "id": id}),
+                        json!({"type": "get_model_catalog", "id": id, "subscribe_usage_updates": true}),
                     )];
                 }
                 vec![Outbound::Reply(ServerFrame::reply(
                     api_id,
                     self.runtime_info(),
                 ))]
+            }
+            "notify_auth_changed" => {
+                let provider = request["provider"].as_str().unwrap_or_default();
+                if provider.is_empty()
+                    || provider.len() > 64
+                    || !provider
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                {
+                    return Self::error_reply(
+                        api_id,
+                        ErrorCode::InvalidRequest,
+                        "invalid auth provider identifier",
+                    );
+                }
+                let id = self.legacy_id();
+                self.pending_simple.push((id, api_id, SimpleKind::Ok));
+                vec![Outbound::Legacy(json!({
+                    "type": "notify_auth_changed", "id": id, "provider": provider
+                }))]
             }
             "set_api_key" | "clear_api_key" => {
                 let provider = request["provider"].as_str().unwrap_or_default();
@@ -944,6 +978,37 @@ impl BridgeState {
         }
     }
 
+    fn attachment_recovery(event: &Value) -> Option<ServerFrame> {
+        if event["messages"].as_array().is_none_or(Vec::is_empty)
+            || event["activity"]["is_processing"].as_bool() == Some(true)
+        {
+            return None;
+        }
+        let directive = &event["reload_recovery"];
+        let (continuation_message, reconnect_notice) = if let Some(message) =
+            directive["continuation_message"].as_str()
+        {
+            (
+                message.to_string(),
+                directive["reconnect_notice"].as_str().map(str::to_string),
+            )
+        } else if event["was_interrupted"].as_bool() == Some(true) {
+            // Compatibility with daemons predating reload_recovery. Keep in
+            // sync with ReloadContext::interrupted_session_continuation_message.
+            ("Your session was interrupted by a server reload while a tool was running. The tool was aborted and results may be incomplete. Continue exactly where you left off and do not ask the user what to do next.".to_string(), None)
+        } else {
+            return None;
+        };
+        if continuation_message.trim().is_empty() {
+            return None;
+        }
+        Some(ServerFrame::event(ApiEvent::SessionRecovery {
+            session_id: event["session_id"].as_str()?.to_string(),
+            continuation_message,
+            reconnect_notice,
+        }))
+    }
+
     /// Translate one legacy server event (raw JSON) into API frames.
     pub fn legacy_event_to_api(&mut self, event: &Value) -> Vec<ServerFrame> {
         let kind = event["type"].as_str().unwrap_or("");
@@ -956,7 +1021,7 @@ impl BridgeState {
             self.observed_turn_active = true;
             self.activity_version += 1;
         }
-        match kind {
+        let mut frames = match kind {
             "session" => {
                 let session_id = event["session_id"].as_str().unwrap_or("").to_string();
                 // `session` is a broadcast lifecycle notification. The daemon
@@ -1014,6 +1079,9 @@ impl BridgeState {
                         api_id,
                         ApiEvent::Attached {
                             session: SessionInfo {
+                                parent_session_id: None,
+                                agent_label: None,
+                                swarm_status: None,
                                 transcript_bytes: Self::transcript_bytes(&session_id),
                                 saved: metadata.as_ref().is_some_and(|value| value.saved),
                                 updated_at_ms: metadata
@@ -1054,9 +1122,10 @@ impl BridgeState {
                             .into(),
                         }));
                     }
-                    return frames;
+                    frames
+                } else {
+                    vec![]
                 }
-                vec![]
             }
             "text_delta" => vec![ServerFrame::event(ApiEvent::TextDelta {
                 session_id: session(self),
@@ -1108,6 +1177,7 @@ impl BridgeState {
                 input: event["input"].as_u64().unwrap_or(0),
                 output: event["output"].as_u64().unwrap_or(0),
                 cache_read_input: event["cache_read_input"].as_u64(),
+                cache_creation_input: event["cache_creation_input"].as_u64(),
             })],
             "done" => {
                 let id = event["id"].as_u64().unwrap_or(0);
@@ -1179,6 +1249,9 @@ impl BridgeState {
                     api_id,
                     ApiEvent::SessionForked {
                         session: SessionInfo {
+                            parent_session_id: None,
+                            agent_label: None,
+                            swarm_status: None,
                             transcript_bytes: Self::transcript_bytes(&session_id),
                             saved: metadata.as_ref().is_some_and(|value| value.saved),
                             updated_at_ms: Self::session_modified_ms(&session_id)
@@ -1215,6 +1288,20 @@ impl BridgeState {
                 // which is the only place it appears: remember it so
                 // `list_sessions` can answer with more than this connection.
                 self.note_sessions(event);
+                if self
+                    .pending_recovery_history
+                    .as_ref()
+                    .is_some_and(|(subscribe_id, target)| {
+                        *subscribe_id == id
+                            && event["session_id"].as_str().is_some_and(|sid| {
+                                !sid.is_empty()
+                                    && target.as_deref().is_none_or(|target| target == sid)
+                            })
+                    })
+                {
+                    self.pending_recovery_history = None;
+                    return Self::attachment_recovery(event).into_iter().collect();
+                }
                 // The catalog probe rides the same `history` reply shape but
                 // carries no messages: it is model identity, not transcript.
                 if self.pending_model_probe == Some(id) {
@@ -1245,18 +1332,28 @@ impl BridgeState {
                 let Some(api_id) = self.take_simple(id, SimpleKind::History) else {
                     return vec![];
                 };
-                let messages = event["messages"]
+                let mut messages: Vec<HistoryMessage> = event["messages"]
                     .as_array()
                     .map(|messages| {
                         messages
                             .iter()
                             .map(|m| HistoryMessage {
+                                response_stats: serde_json::from_value(m["response_stats"].clone())
+                                    .unwrap_or(None),
                                 role: m["role"].as_str().unwrap_or("").to_string(),
                                 content: m["content"].as_str().unwrap_or("").to_string(),
                             })
                             .collect()
                     })
                     .unwrap_or_default();
+                // A stored terminal-looking row can still belong to a running
+                // turn (e.g. an automatic continuation). Do not show a footer yet.
+                if event["activity"]["is_processing"].as_bool() == Some(true) {
+                    let start = messages.iter().rposition(|m| m.role == "user").unwrap_or(0);
+                    for message in &mut messages[start..] {
+                        message.response_stats = None;
+                    }
+                }
                 let images = serde_json::from_value(event["images"].clone()).unwrap_or_default();
                 let mut frames = vec![ServerFrame::reply(
                     api_id,
@@ -1398,6 +1495,34 @@ impl BridgeState {
                     display_title: event["display_title"].as_str().unwrap_or("").to_string(),
                 })]
             }
+            "model_usage_updated" => {
+                let route = &event["route"];
+                let (Some(model), Some(provider), Some(api_method), Ok(usage)) = (
+                    route["model"].as_str(),
+                    route["provider"].as_str(),
+                    route["api_method"].as_str(),
+                    serde_json::from_value::<jcode_harness_api::ModelUsage>(route["usage"].clone()),
+                ) else {
+                    return vec![];
+                };
+                let observed = self
+                    .model_usage_updates
+                    .entry((model.into(), provider.into(), api_method.into()))
+                    .or_default();
+                observed.merge_observation(&usage);
+                for cached in &mut self.available_routes {
+                    if model == cached.model
+                        && provider == cached.provider
+                        && api_method == cached.api_method
+                    {
+                        cached
+                            .usage
+                            .get_or_insert_with(Default::default)
+                            .merge_observation(observed);
+                    }
+                }
+                vec![ServerFrame::event(self.runtime_info())]
+            }
             "available_models_updated" => {
                 self.note_models(event);
                 vec![
@@ -1476,6 +1601,7 @@ impl BridgeState {
                     self.pending_attach_id = None;
                     self.pending_attach_subscribe_id = None;
                     self.pending_model_probe = None;
+                    self.pending_recovery_history = None;
                     return vec![ServerFrame::reply(
                         api_id,
                         ApiEvent::Error {
@@ -1527,7 +1653,17 @@ impl BridgeState {
             // Everything else on the legacy stream is not part of the stable
             // API surface yet; drop it.
             _ => vec![],
+        };
+        for frame in &mut frames {
+            if let ApiEvent::Attached { session } | ApiEvent::SessionForked { session } =
+                &mut frame.event
+            {
+                jcode_harness_api::enrich_sessions_from_local_swarm_state(
+                    std::slice::from_mut(session),
+                );
+            }
         }
+        frames
     }
 
     /// Read provider/model identity out of any legacy event that carries the
@@ -1565,9 +1701,22 @@ impl BridgeState {
                         api_method: route["api_method"].as_str()?.to_string(),
                         available: route["available"].as_bool().unwrap_or(false),
                         detail: route["detail"].as_str().unwrap_or_default().to_string(),
+                        usage: serde_json::from_value(route["usage"].clone()).unwrap_or(None),
                     })
                 })
                 .collect();
+            for route in &mut self.available_routes {
+                if let Some(usage) = self.model_usage_updates.get(&(
+                    route.model.clone(),
+                    route.provider.clone(),
+                    route.api_method.clone(),
+                )) {
+                    route
+                        .usage
+                        .get_or_insert_with(Default::default)
+                        .merge_observation(usage);
+                }
+            }
         }
     }
 
@@ -2477,6 +2626,7 @@ impl BridgeState {
                 }
                 let content = flatten_content(&message["content"]);
                 (!content.trim().is_empty()).then(|| HistoryMessage {
+                    response_stats: None,
                     role: role.to_string(),
                     content,
                 })
