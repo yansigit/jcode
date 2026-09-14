@@ -65,10 +65,10 @@ impl McpHandle {
         }
 
         let msg = serde_json::to_string(&request)? + "\n";
-        self.writer_tx
-            .send(msg)
-            .await
-            .context("Failed to send request")?;
+        if let Err(error) = self.writer_tx.send(msg).await {
+            self.pending.lock().await.remove(&id);
+            return Err(error).context("Failed to send request");
+        }
 
         let timeout = self
             .method_timeouts
@@ -289,6 +289,19 @@ impl McpClient {
                         break;
                     }
                 }
+            }
+            let mut pending = pending_clone.lock().await;
+            for (id, tx) in pending.drain() {
+                let _ = tx.send(JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: Some(id),
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -32000,
+                        message: format!("MCP server '{}' disconnected", reader_name),
+                        data: None,
+                    }),
+                });
             }
         });
 
@@ -527,6 +540,42 @@ done
             timeout_secs: None,
             timeout_secs_by_method: std::collections::HashMap::new(),
         }
+    }
+
+    fn hanging_server_config(timeout_secs: u64) -> McpServerConfig {
+        let mut config = fake_server_config();
+        config.args[1] = r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"initialize"'*)
+      printf '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"hanging","version":"0"}}}\n'
+      ;;
+    *'"tools/list"'*)
+      printf '{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}\n'
+      ;;
+  esac
+done
+"#.to_string();
+        config.timeout_secs = Some(timeout_secs);
+        config
+    }
+
+    #[tokio::test]
+    async fn request_timeout_removes_pending_sender() {
+        let client = McpClient::connect(
+            "timeout-cleanup-test".to_string(),
+            &hanging_server_config(1),
+        )
+        .await
+        .expect("connect");
+
+        let error = client
+            .handle()
+            .request("tools/call", Some(serde_json::json!({"name": "slow"})))
+            .await
+            .expect_err("hanging request must time out");
+        assert!(error.to_string().contains("Request timeout after 1s"));
+        assert!(client.handle.pending.lock().await.is_empty());
     }
 
     #[tokio::test]
