@@ -17,6 +17,7 @@ fn cfg(command: &str, args: &[&str]) -> McpServerConfig {
         enabled: None,
         disabled: None,
         timeout_secs: None,
+        timeout_secs_by_method: std::collections::HashMap::new(),
     }
 }
 
