@@ -1658,9 +1658,9 @@ impl BridgeState {
             if let ApiEvent::Attached { session } | ApiEvent::SessionForked { session } =
                 &mut frame.event
             {
-                jcode_harness_api::enrich_sessions_from_local_swarm_state(
-                    std::slice::from_mut(session),
-                );
+                jcode_harness_api::enrich_sessions_from_local_swarm_state(std::slice::from_mut(
+                    session,
+                ));
             }
         }
         frames
@@ -2032,6 +2032,9 @@ impl BridgeState {
                     .then_some((id, path))
             })
             .collect();
+        if candidates.is_empty() {
+            return Vec::new();
+        }
         // `stat` is the dominant cost with 100k+ sessions. Match the TUI picker
         // by doing those independent filesystem calls concurrently rather than
         // serially blocking the API reply long enough for clients to time out.
