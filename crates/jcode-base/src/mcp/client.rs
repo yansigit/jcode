@@ -25,6 +25,8 @@ pub struct McpHandle {
     tools: Arc<std::sync::RwLock<Vec<McpToolDef>>>,
     /// Reply timeout applied to every request on this server.
     request_timeout: std::time::Duration,
+    /// Method-specific reply timeouts overriding `request_timeout`.
+    method_timeouts: Arc<HashMap<String, std::time::Duration>>,
 }
 
 /// Default reply timeout when a server config does not set `timeout_secs`.
@@ -37,6 +39,17 @@ pub fn request_timeout_for(config: &McpServerConfig) -> std::time::Duration {
         .filter(|secs| *secs > 0)
         .map(std::time::Duration::from_secs)
         .unwrap_or(DEFAULT_MCP_REQUEST_TIMEOUT)
+}
+
+/// Resolve the reply timeout for one JSON-RPC method.
+pub fn request_timeout_for_method(config: &McpServerConfig, method: &str) -> std::time::Duration {
+    config
+        .timeout_secs_by_method
+        .get(method)
+        .copied()
+        .filter(|secs| *secs > 0)
+        .map(std::time::Duration::from_secs)
+        .unwrap_or_else(|| request_timeout_for(config))
 }
 
 impl McpHandle {
@@ -57,16 +70,27 @@ impl McpHandle {
             .await
             .context("Failed to send request")?;
 
-        let response = tokio::time::timeout(self.request_timeout, rx)
-            .await
-            .with_context(|| {
-                format!(
-                    "Request timeout after {}s (raise `timeout_secs` for MCP server '{}' if its tools legitimately run longer)",
-                    self.request_timeout.as_secs(),
+        let timeout = self
+            .method_timeouts
+            .get(method)
+            .copied()
+            .unwrap_or(self.request_timeout);
+        let response = match tokio::time::timeout(timeout, rx).await {
+            Ok(result) => result.context("Channel closed")?,
+            Err(_) => {
+                // A timed-out oneshot receiver does not remove its sender from
+                // the shared map. Clean it up so a late response cannot retain
+                // the request indefinitely and a reused server does not grow
+                // stale pending state (issues #802 / #1174).
+                self.pending.lock().await.remove(&id);
+                return Err(anyhow::anyhow!(
+                    "Request timeout after {}s (raise `timeout_secs` or `timeout_secs_by_method.{}` for MCP server '{}' if its tools legitimately run longer)",
+                    timeout.as_secs(),
+                    method,
                     self.name
-                )
-            })?
-            .context("Channel closed")?;
+                ));
+            }
+        };
 
         if let Some(err) = &response.error {
             anyhow::bail!("MCP error {}: {}", err.code, err.message);
@@ -277,6 +301,16 @@ impl McpClient {
             capabilities: Arc::new(std::sync::RwLock::new(ServerCapabilities::default())),
             tools: Arc::new(std::sync::RwLock::new(Vec::new())),
             request_timeout: request_timeout_for(config),
+            method_timeouts: Arc::new(
+                config
+                    .timeout_secs_by_method
+                    .iter()
+                    .filter_map(|(method, secs)| {
+                        (*secs > 0)
+                            .then_some((method.clone(), std::time::Duration::from_secs(*secs)))
+                    })
+                    .collect(),
+            ),
         };
 
         let mut client = Self { handle, child };
@@ -491,6 +525,7 @@ done
             enabled: None,
             disabled: None,
             timeout_secs: None,
+            timeout_secs_by_method: std::collections::HashMap::new(),
         }
     }
 

@@ -112,7 +112,11 @@ fn test_mcp_config_timeout_secs_defaults_to_none_and_accepts_override() {
     let json = r#"{
             "mcpServers": {
                 "fast": {"command": "fast-mcp"},
-                "slow": {"command": "slow-mcp", "timeout_secs": 120}
+                "slow": {
+                    "command": "slow-mcp",
+                    "timeout_secs": 120,
+                    "timeout_secs_by_method": {"tools/call": 300}
+                }
             }
         }"#;
     let config: McpConfig = serde_json::from_str(json).unwrap();
@@ -126,6 +130,14 @@ fn test_mcp_config_timeout_secs_defaults_to_none_and_accepts_override() {
     );
     assert_eq!(
         crate::mcp::request_timeout_for(slow),
+        std::time::Duration::from_secs(120)
+    );
+    assert_eq!(
+        crate::mcp::request_timeout_for_method(slow, "tools/call"),
+        std::time::Duration::from_secs(300)
+    );
+    assert_eq!(
+        crate::mcp::request_timeout_for_method(slow, "tools/list"),
         std::time::Duration::from_secs(120)
     );
     // Zero is treated as "unset" rather than an instant timeout.
@@ -666,6 +678,10 @@ fn claude_is_live_while_codex_is_a_one_time_snapshot() {
 command = "codex-bin"
 args = ["--snapshot"]
 env = { TOKEN = "codex-inline-secret" }
+timeout_secs = 45
+
+[mcp_servers.codex_only.timeout_secs_by_method]
+"tools/call" = 300
 "#,
     )
     .expect("write Codex config");
@@ -675,6 +691,9 @@ env = { TOKEN = "codex-inline-secret" }
         assert!(first.servers.contains_key("alpha"));
         assert!(first.servers.contains_key("beta"));
         assert!(first.servers.contains_key("codex_only"));
+        let codex = first.servers.get("codex_only").expect("Codex server");
+        assert_eq!(codex.timeout_secs, Some(45));
+        assert_eq!(codex.timeout_secs_by_method.get("tools/call"), Some(&300));
 
         let snapshot_path = home.path().join("mcp.json");
         let snapshot = std::fs::read_to_string(&snapshot_path).expect("Codex snapshot");

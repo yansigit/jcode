@@ -598,13 +598,16 @@ Example MCP config:
     },
     "websearch": {
       "command": "/path/to/slow-mcp-server",
-      "timeout_secs": 120
+      "timeout_secs": 60,
+      "timeout_secs_by_method": {
+        "tools/call": 300
+      }
     }
   }
 }
 ```
 
-Each request to an MCP server (`tools/call`, `tools/list`, `initialize`) times out after 30 seconds by default. Set `timeout_secs` on a server whose tools legitimately run longer.
+Each request to an MCP server (`tools/call`, `tools/list`, `initialize`) times out after 30 seconds by default. Set `timeout_secs` to raise the timeout for every method, or use `timeout_secs_by_method` to raise only selected methods such as a long-running `tools/call`. Values of zero are ignored. The same keys are accepted when importing Codex MCP configuration.
 
 For headless or SSH sessions, OAuth-style providers support `jcode login --provider <provider> --no-browser` (alias: `--headless`) so jcode prints the auth URL/QR and falls back to manual code or callback paste instead of trying to launch a local browser.
 

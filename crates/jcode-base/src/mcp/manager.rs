@@ -623,6 +623,7 @@ mod tests {
                 enabled: Some(false),
                 disabled: None,
                 timeout_secs: None,
+                timeout_secs_by_method: HashMap::new(),
             },
         );
         let manager = McpManager::with_config(config);
@@ -658,6 +659,7 @@ mod tests {
                 enabled: None,
                 disabled: None,
                 timeout_secs: None,
+                timeout_secs_by_method: HashMap::new(),
             },
         );
         let manager = McpManager::with_config(config);
@@ -766,6 +768,7 @@ done
                 enabled: None,
                 disabled: None,
                 timeout_secs: None,
+                timeout_secs_by_method: HashMap::new(),
             },
         );
         let manager = McpManager::with_config(config.clone());
