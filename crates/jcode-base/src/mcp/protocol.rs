@@ -227,6 +227,12 @@ pub struct McpServerConfig {
     /// extraction) can raise it here (issues #802, #1174).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
+    /// Optional method-specific reply timeouts. These override `timeout_secs`
+    /// for matching JSON-RPC methods, which is useful for long-running
+    /// `tools/call` operations without making initialize/tools/list wait as
+    /// long (issue #802).
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub timeout_secs_by_method: std::collections::HashMap<String, u64>,
 }
 
 impl McpServerConfig {
@@ -510,6 +516,26 @@ impl McpConfig {
                         .get("shared")
                         .and_then(|v| v.as_bool())
                         .unwrap_or(true);
+                    let timeout_secs = server
+                        .get("timeout_secs")
+                        .and_then(|v| v.as_integer())
+                        .filter(|secs| *secs > 0)
+                        .map(|secs| secs as u64);
+                    let timeout_secs_by_method = server
+                        .get("timeout_secs_by_method")
+                        .and_then(|v| v.as_table())
+                        .map(|table| {
+                            table
+                                .iter()
+                                .filter_map(|(method, value)| {
+                                    value
+                                        .as_integer()
+                                        .filter(|secs| *secs > 0)
+                                        .map(|secs| (method.clone(), secs as u64))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
                     config.servers.insert(
                         name.clone(),
                         McpServerConfig {
@@ -522,7 +548,8 @@ impl McpConfig {
                             headers: std::collections::HashMap::new(),
                             enabled: None,
                             disabled: None,
-                            timeout_secs: None,
+                            timeout_secs,
+                            timeout_secs_by_method,
                         },
                     );
                 }
