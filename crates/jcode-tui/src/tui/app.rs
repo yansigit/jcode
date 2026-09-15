@@ -298,8 +298,6 @@ struct ModelPickerCacheSignature {
     current_model: String,
     config_default_model: Option<String>,
     config_default_provider: Option<String>,
-    reasoning_effort: Option<String>,
-    available_efforts: Vec<String>,
     simplified_model_picker: bool,
     catalog_revision: u64,
     remote_provider_name: Option<String>,

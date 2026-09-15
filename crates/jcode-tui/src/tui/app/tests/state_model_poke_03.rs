@@ -1296,14 +1296,14 @@ fn test_model_picker_state_space_preserves_provider_labels_after_route_hydration
         );
     }
 
-    // Models with reasoning-effort support expand into effort rows (issue
-    // #458); the hydrated route must be preserved on each variant.
+    // Reasoning effort is an independent control. Hydrated provider routes
+    // must remain attached to the single plain model row.
     assert_eq!(
-        routes_by_model.get("gpt-5.5 (high)"),
+        routes_by_model.get("gpt-5.5"),
         Some(&("OpenAI".to_string(), "openai-oauth".to_string()))
     );
     assert_eq!(
-        routes_by_model.get("claude-opus-4-6 (high)"),
+        routes_by_model.get("claude-opus-4-6"),
         Some(&("Anthropic".to_string(), "claude-oauth".to_string()))
     );
     assert_eq!(
@@ -1311,7 +1311,7 @@ fn test_model_picker_state_space_preserves_provider_labels_after_route_hydration
         Some(&("Chutes".to_string(), "openai-compatible:chutes".to_string()))
     );
     assert_eq!(
-        routes_by_model.get("deepseek/deepseek-v4-pro (high)"),
+        routes_by_model.get("deepseek/deepseek-v4-pro"),
         Some(&("auto".to_string(), "openrouter".to_string()))
     );
 
@@ -1805,8 +1805,8 @@ fn test_local_model_picker_openrouter_bare_openai_route_uses_openai_catalog_pref
     let model_idx = picker
         .entries
         .iter()
-        .position(|entry| entry.name == "gpt-5.4 (high)")
-        .expect("openrouter-backed OpenAI effort entry should be in picker");
+        .position(|entry| entry.name == "gpt-5.4")
+        .expect("openrouter-backed OpenAI model should be in picker");
     let filtered_pos = picker
         .filtered
         .iter()
@@ -1836,8 +1836,8 @@ fn test_agent_model_picker_openrouter_bare_openai_route_saves_openai_catalog_pre
     let model_idx = picker
         .entries
         .iter()
-        .position(|entry| entry.name == "gpt-5.4 (high)")
-        .expect("openrouter-backed OpenAI effort entry should be in picker");
+        .position(|entry| entry.name == "gpt-5.4")
+        .expect("openrouter-backed OpenAI model should be in picker");
     let filtered_pos = picker
         .filtered
         .iter()

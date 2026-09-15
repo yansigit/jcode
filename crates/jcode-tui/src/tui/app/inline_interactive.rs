@@ -98,7 +98,6 @@ fn model_picker_favorites_path() -> Option<std::path::PathBuf> {
 
 #[path = "inline_interactive_placeholder_routes.rs"]
 mod placeholder_routes;
-use placeholder_routes::route_supports_reasoning_effort;
 
 /// Apply the `provider.model_picker_providers` allowlist (issue #460).
 ///
@@ -495,31 +494,6 @@ fn model_picker_route_provider_matches_key(
         route_provider_label,
         desired_provider,
     )
-}
-
-/// Whether an effort-qualified picker entry matches the persisted reasoning
-/// effort for its route's provider family. Entries without an effort always
-/// match. When no effort is persisted for the family, every variant matches
-/// (legacy model-level behavior) so we never hide the `default` marker
-/// entirely (issue #675).
-fn model_picker_effort_matches_default(
-    provider_key: Option<&str>,
-    entry_effort: Option<&str>,
-    anthropic_effort: Option<&str>,
-    openai_effort: Option<&str>,
-) -> bool {
-    let Some(effort) = entry_effort else {
-        return true;
-    };
-    let stored = match provider_key {
-        Some("claude-oauth") | Some("claude-api") => anthropic_effort,
-        Some("openai-oauth") | Some("openai-api") => openai_effort,
-        _ => None,
-    };
-    match stored {
-        Some(stored) => stored.eq_ignore_ascii_case(effort),
-        None => true,
-    }
 }
 
 fn model_picker_route_is_default(
@@ -1001,8 +975,6 @@ impl App {
         current_model: &str,
         config_default_model: Option<String>,
         config_default_provider: Option<String>,
-        current_effort: Option<String>,
-        available_efforts: &[&str],
     ) -> ModelPickerCacheSignature {
         ModelPickerCacheSignature {
             is_remote: self.is_remote,
@@ -1016,11 +988,6 @@ impl App {
             current_model: current_model.to_string(),
             config_default_model,
             config_default_provider,
-            reasoning_effort: current_effort,
-            available_efforts: available_efforts
-                .iter()
-                .map(|effort| (*effort).to_string())
-                .collect(),
             simplified_model_picker: crate::perf::tui_policy().simplified_model_picker,
             catalog_revision: self.model_picker_catalog_revision,
             remote_provider_name: self.remote_provider_name.clone(),
@@ -1204,26 +1171,10 @@ impl App {
         let config_default_model = config.provider.default_model.clone();
         let config_default_provider = config.provider.default_provider.clone();
 
-        let current_effort = if self.is_remote {
-            self.remote_reasoning_effort.clone()
-        } else {
-            self.provider.reasoning_effort()
-        };
-        let available_efforts = if self.is_remote {
-            inferred_reasoning_efforts(
-                self.remote_provider_name.as_deref(),
-                self.remote_provider_model.as_deref(),
-            )
-        } else {
-            self.provider.available_efforts()
-        };
-
         let cache_signature = self.model_picker_cache_signature(
             &current_model,
             config_default_model.clone(),
             config_default_provider.clone(),
-            current_effort.clone(),
-            &available_efforts,
         );
         if self.open_cached_model_picker_if_fresh(&cache_signature, picker_started, preserve_input)
         {
@@ -1274,7 +1225,7 @@ impl App {
             // take seconds on a large catalog, so for big catalogs open
             // instantly with lightweight names-only routes and upgrade in the
             // background. Small catalogs stay synchronous so the first paint
-            // already has effort-expanded, provider-classified rows.
+            // already has provider-classified rows.
             const SYNC_REMOTE_FALLBACK_MAX_MODELS: usize = 64;
             if crate::tui::is_ssh_remote() {
                 self.build_remote_model_routes_lightweight_fallback(&current_model)
@@ -1452,25 +1403,10 @@ impl App {
         };
         let config_default_model = config.provider.default_model.clone();
         let config_default_provider = config.provider.default_provider.clone();
-        let current_effort = if self.is_remote {
-            self.remote_reasoning_effort.clone()
-        } else {
-            self.provider.reasoning_effort()
-        };
-        let available_efforts = if self.is_remote {
-            inferred_reasoning_efforts(
-                self.remote_provider_name.as_deref(),
-                self.remote_provider_model.as_deref(),
-            )
-        } else {
-            self.provider.available_efforts()
-        };
         let current_signature = self.model_picker_cache_signature(
             &current_model,
             config_default_model,
             config_default_provider,
-            current_effort,
-            &available_efforts,
         );
         if current_signature != pending.signature {
             return false;
@@ -1533,33 +1469,12 @@ impl App {
         };
         let config_default_model = config.provider.default_model.clone();
         let config_default_provider = config.provider.default_provider.clone();
-        let config_anthropic_effort = config.provider.anthropic_reasoning_effort.clone();
-        let config_openai_effort = config.provider.openai_reasoning_effort.clone();
-        let current_effort = if self.is_remote {
-            self.remote_reasoning_effort.clone()
-        } else {
-            self.provider.reasoning_effort()
-        };
-
-        let is_config_default = |name: &str, route: &PickerOption, effort: Option<&str>| -> bool {
-            if !model_picker_route_is_default(
+        let is_config_default = |name: &str, route: &PickerOption| -> bool {
+            model_picker_route_is_default(
                 name,
                 route,
                 config_default_model.as_deref(),
                 config_default_provider.as_deref(),
-            ) {
-                return false;
-            }
-            let selection = crate::provider::MultiProvider::default_model_selection_from_route(
-                name,
-                &route.api_method,
-                &route.provider,
-            );
-            model_picker_effort_matches_default(
-                selection.provider_key.as_deref(),
-                effort,
-                config_anthropic_effort.as_deref(),
-                config_openai_effort.as_deref(),
             )
         };
 
@@ -1727,94 +1642,11 @@ impl App {
                 }
             }
 
-            // Expand each route only across the effort ladder its runtime can
-            // actually apply. The same model can be reachable through native
-            // OpenAI (where `max` is real) and OpenRouter (where `max` aliases
-            // `xhigh`), so model-id-only inference over-advertises values.
-            let mut effort_routes = Vec::new();
-            let mut plain_routes = Vec::new();
-            let mut model_efforts = Vec::new();
-            for route in entry_routes {
-                let efforts = if route_supports_reasoning_effort(&route.api_method) {
-                    inferred_reasoning_efforts(Some(&route.api_method), Some(name))
-                } else {
-                    Vec::new()
-                };
-                if efforts.is_empty() {
-                    plain_routes.push(route);
-                } else {
-                    for effort in &efforts {
-                        if !model_efforts.contains(effort) {
-                            model_efforts.push(*effort);
-                        }
-                    }
-                    effort_routes.push((route, efforts));
-                }
-            }
-
-            if !effort_routes.is_empty() {
-                for effort in &model_efforts {
-                    // Swarm modes (swarm / swarm-deep) are orchestration rungs on
-                    // the effort ladder, not per-model reasoning variants. They
-                    // must not generate `model (swarm)` picker rows.
-                    if crate::prompt::is_swarm_mode_effort(effort) {
-                        continue;
-                    }
-                    let effort_label = match *effort {
-                        "xhigh" => "xhigh",
-                        "max" => "max",
-                        "high" => "high",
-                        "medium" => "med",
-                        "low" => "low",
-                        "none" => "none",
-                        other => other,
-                    };
-                    let display_name = format!("{} ({})", name, effort_label);
-                    let effort_matches_current =
-                        *name == current_model && current_effort.as_deref() == Some(*effort);
-                    let or_created = openrouter_created_timestamp(name);
-                    for (route, route_efforts) in &effort_routes {
-                        if !route_efforts.contains(effort) {
-                            continue;
-                        }
-                        let is_this_current = effort_matches_current
-                            && model_picker_route_is_current(
-                                name,
-                                route,
-                                &current_model,
-                                &current_provider,
-                                current_api_method.as_deref(),
-                            );
-                        entries.push(PickerEntry {
-                            name: display_name.clone(),
-                            options: vec![route.clone()],
-                            action: PickerAction::Model,
-                            selected_option: 0,
-                            is_current: is_this_current,
-                            recommended: *effort == "high"
-                                && model_picker_route_is_recommended(name, route),
-                            recommendation_rank: model_picker_recommendation_rank(name),
-                            usage_score: model_picker_usage_score(
-                                &usage_store,
-                                name,
-                                route,
-                                Some(effort),
-                            ),
-                            old: old_threshold_secs > 0
-                                && or_created.map(|t| t < old_threshold_secs).unwrap_or(false),
-                            created_date: or_created.map(format_created),
-                            effort: Some(effort.to_string()),
-                            is_default: is_config_default(name, route, Some(effort)),
-                            is_favorite: model_picker_is_favorite(
-                                &favorites_store,
-                                name,
-                                route,
-                                Some(effort),
-                            ),
-                        });
-                    }
-                }
-            }
+            // Reasoning effort and fast mode are independent runtime controls.
+            // Keep one picker row per model route instead of multiplying the
+            // catalog into synthetic `model (effort)` entries. Cursor remains
+            // special because its catalog exposes effort/fast as exact wire IDs.
+            let plain_routes = entry_routes;
             {
                 let or_created = openrouter_created_timestamp(name);
                 let is_old = old_threshold_secs > 0
@@ -1879,7 +1711,7 @@ impl App {
                         &current_provider,
                         current_api_method.as_deref(),
                     );
-                    let is_default = is_config_default(&exact_name, route, None);
+                    let is_default = is_config_default(&exact_name, route);
                     let recommendation_rank = model_picker_recommendation_rank(&exact_name);
                     let usage_score =
                         model_picker_usage_score(&usage_store, &exact_name, route, None);
@@ -1911,7 +1743,7 @@ impl App {
                         &current_provider,
                         current_api_method.as_deref(),
                     );
-                    let is_default = is_config_default(name, &route, None);
+                    let is_default = is_config_default(name, &route);
                     entries.push(PickerEntry {
                         name: name.clone(),
                         options: vec![route.clone()],
@@ -2190,25 +2022,10 @@ impl App {
         };
         let config_default_model = config.provider.default_model.clone();
         let config_default_provider = config.provider.default_provider.clone();
-        let current_effort = if self.is_remote {
-            self.remote_reasoning_effort.clone()
-        } else {
-            self.provider.reasoning_effort()
-        };
-        let available_efforts = if self.is_remote {
-            inferred_reasoning_efforts(
-                self.remote_provider_name.as_deref(),
-                self.remote_provider_model.as_deref(),
-            )
-        } else {
-            self.provider.available_efforts()
-        };
         let signature = self.model_picker_cache_signature(
             &current_model,
             config_default_model,
             config_default_provider,
-            current_effort,
-            &available_efforts,
         );
 
         let routes_started = std::time::Instant::now();
@@ -4093,11 +3910,11 @@ mod tests {
         REMOTE_MODEL_CATALOG_CACHE_MAX_AGE_SECS, REMOTE_MODEL_CATALOG_CACHE_VERSION,
         REMOTE_MODEL_CATALOG_MAX_DETAIL_BYTES, RemoteModelCatalogCache,
         filter_routes_by_provider_allowlist, key_char_eq_ignore_ascii_case,
-        model_picker_effort_matches_default, model_picker_route_is_current,
-        model_picker_route_is_default, model_picker_route_is_recommended,
+        model_picker_route_is_current, model_picker_route_is_default,
+        model_picker_route_is_recommended,
         next_model_favorite_after_current, picker_is_runtime_model_picker,
         remote_model_catalog_cache_is_fresh, remote_model_catalog_cache_origin,
-        remote_model_catalog_snapshot_is_safe, route_supports_reasoning_effort,
+        remote_model_catalog_snapshot_is_safe,
     };
     use crate::tui::{
         AgentModelTarget, App, InlineInteractiveState, PickerAction, PickerEntry, PickerKind,
@@ -4423,57 +4240,6 @@ mod tests {
     }
 
     #[test]
-    fn model_picker_effort_default_matches_only_stored_variant() {
-        // Anthropic: stored effort selects exactly one variant.
-        assert!(model_picker_effort_matches_default(
-            Some("claude-oauth"),
-            Some("high"),
-            Some("high"),
-            None,
-        ));
-        assert!(!model_picker_effort_matches_default(
-            Some("claude-oauth"),
-            Some("low"),
-            Some("high"),
-            None,
-        ));
-        // OpenAI uses its own stored effort.
-        assert!(model_picker_effort_matches_default(
-            Some("openai-oauth"),
-            Some("medium"),
-            None,
-            Some("medium"),
-        ));
-        assert!(!model_picker_effort_matches_default(
-            Some("openai-api"),
-            Some("high"),
-            None,
-            Some("medium"),
-        ));
-        // No stored effort: every variant keeps the legacy default marker.
-        assert!(model_picker_effort_matches_default(
-            Some("claude-oauth"),
-            Some("xhigh"),
-            None,
-            None,
-        ));
-        // Entries without an effort always match.
-        assert!(model_picker_effort_matches_default(
-            Some("claude-oauth"),
-            None,
-            Some("high"),
-            None,
-        ));
-        // Unknown provider families ignore stored efforts.
-        assert!(model_picker_effort_matches_default(
-            Some("openrouter"),
-            Some("high"),
-            Some("low"),
-            Some("low"),
-        ));
-    }
-
-    #[test]
     fn model_picker_default_route_honors_provider_prefixed_model_specs() {
         let openai_route = picker_option_with_method("OpenAI", "openai-oauth");
         let copilot_route = picker_option_with_method("Copilot", "copilot");
@@ -4680,8 +4446,11 @@ mod tests {
         app.is_remote = true;
         app.remote_provider_name = Some("Cursor".to_string());
         app.remote_provider_model = Some("cursor-grok-4.6-high-fast".to_string());
-        let signature =
-            app.model_picker_cache_signature("cursor-grok-4.6-high-fast", None, None, None, &[]);
+        let signature = app.model_picker_cache_signature(
+            "cursor-grok-4.6-high-fast",
+            None,
+            None,
+        );
         let routes = vec![
             model_route("cursor-grok-4.6-low", "Cursor", "cursor"),
             model_route("cursor-grok-4.6-low-fast", "Cursor", "cursor"),
@@ -4762,25 +4531,6 @@ mod tests {
                 .any(|&index| picker.entries[index].name == "gpt-5.5"),
             "an exact grouped wire id should find its base family row"
         );
-    }
-
-    #[test]
-    fn route_effort_support_covers_effort_capable_runtimes_only() {
-        assert!(route_supports_reasoning_effort("claude-oauth"));
-        assert!(route_supports_reasoning_effort("claude-api"));
-        assert!(route_supports_reasoning_effort("openai-oauth"));
-        assert!(route_supports_reasoning_effort("openai-api-key"));
-        assert!(route_supports_reasoning_effort("openrouter"));
-        assert!(!route_supports_reasoning_effort(
-            "openai-compatible:llamacpp"
-        ));
-        assert!(!route_supports_reasoning_effort("openai-compatible:zai"));
-        assert!(!route_supports_reasoning_effort("copilot"));
-        assert!(!route_supports_reasoning_effort("bedrock"));
-        assert!(!route_supports_reasoning_effort("https"));
-        assert!(!route_supports_reasoning_effort("openai-compatible"));
-        assert!(!route_supports_reasoning_effort("remote-catalog"));
-        assert!(!route_supports_reasoning_effort("current"));
     }
 
     #[test]

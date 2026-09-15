@@ -230,7 +230,7 @@ fn test_model_picker_preview_stays_open_and_updates_filter() {
         picker
             .filtered
             .iter()
-            .any(|&i| picker.entries[i].name.starts_with("gpt-5.2-codex ("))
+            .any(|&i| picker.entries[i].name == "gpt-5.2-codex")
     );
     assert_eq!(app.input(), "/model g52c");
 }

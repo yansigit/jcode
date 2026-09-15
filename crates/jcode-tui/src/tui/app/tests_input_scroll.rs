@@ -145,8 +145,8 @@ fn test_disconnected_key_handler_runs_effort_locally() {
 fn test_disconnected_key_handler_runs_model_picker_locally() {
     let mut app = create_test_app();
     configure_test_remote_models(&mut app);
-    // OpenAI models are effort-expanded into one entry per reasoning effort,
-    // and the "current" entry only matches when the session's effort matches.
+    // Reasoning effort is independent from model selection. The current model
+    // row remains selected regardless of the session effort.
     app.remote_reasoning_effort = Some("high".to_string());
     app.input = "/model".to_string();
     app.cursor_pos = app.input.len();
@@ -161,7 +161,7 @@ fn test_disconnected_key_handler_runs_model_picker_locally() {
         .expect("model picker should open");
     assert!(!picker.entries.is_empty());
     let selected = &picker.entries[picker.selected];
-    assert_eq!(selected.name, "gpt-5.3-codex (high)");
+    assert_eq!(selected.name, "gpt-5.3-codex");
     assert!(selected.is_current, "current model should be preselected");
 }
 

@@ -1753,13 +1753,10 @@ fn test_handle_input_shell_completed_renders_markdown_blocks() {
     );
 }
 
-/// Regression for issue #427: selecting an effort-variant model row (e.g.
-/// "gpt-5.5 (high)") in the remote model picker must stage the chosen effort
-/// alongside the pending model switch. Previously only the model spec was
-/// staged, so the server kept its configured default effort (low) and the
-/// session silently ran gpt-5.5 at low effort.
+/// The model picker publishes one row per route. Reasoning effort remains an
+/// independent session control and selecting a model must not overwrite it.
 #[test]
-fn test_model_picker_effort_variant_selection_stages_effort_in_remote_mode() {
+fn test_model_picker_model_selection_preserves_effort_in_remote_mode() {
     let mut app = create_test_app();
     configure_test_remote_models_with_openai_recommendations(&mut app);
 
@@ -1770,22 +1767,30 @@ fn test_model_picker_effort_variant_selection_stages_effort_in_remote_mode() {
         .as_ref()
         .expect("model picker should be open");
 
-    let entry_idx = picker
+    let matching: Vec<_> = picker
         .entries
         .iter()
-        .position(|m| m.name == "gpt-5.5 (high)")
-        .expect("gpt-5.5 (high) should be in picker");
-    assert_eq!(
-        picker.entries[entry_idx].effort.as_deref(),
-        Some("high"),
-        "effort variant rows must carry their effort"
+        .enumerate()
+        .filter(|(_, entry)| {
+            entry.name == "gpt-5.5"
+                && entry.active_option().is_some_and(|route| {
+                    route.api_method == "openai-oauth" && route.provider == "OpenAI"
+                })
+        })
+        .collect();
+    assert_eq!(matching.len(), 1, "OpenAI model routes must publish one row");
+    let entry_idx = matching[0].0;
+    assert!(picker.entries[entry_idx].effort.is_none());
+    assert!(
+        !picker.entries.iter().any(|entry| entry.name.starts_with("gpt-5.5 (")),
+        "reasoning efforts must not be synthesized into model rows"
     );
 
     let filtered_pos = picker
         .filtered
         .iter()
         .position(|&i| i == entry_idx)
-        .expect("gpt-5.5 (high) should be in filtered list");
+        .expect("gpt-5.5 should be in filtered list");
     app.inline_interactive_state.as_mut().unwrap().selected = filtered_pos;
 
     app.handle_key(KeyCode::Enter, KeyModifiers::empty())
@@ -1797,14 +1802,14 @@ fn test_model_picker_effort_variant_selection_stages_effort_in_remote_mode() {
         "model switch should be staged for the remote dispatcher"
     );
     assert_eq!(
-        app.pending_reasoning_effort.as_deref(),
-        Some("high"),
-        "the picked effort variant must be staged so it reaches the server (issue #427)"
+        app.pending_reasoning_effort,
+        None,
+        "selecting a model must preserve the independently configured effort"
     );
 }
 
 #[test]
-fn test_model_picker_effort_variants_follow_each_route_vocabulary() {
+fn test_model_picker_effort_capable_routes_each_publish_one_plain_row() {
     let mut app = create_test_app();
     configure_test_remote_models_with_openai_recommendations(&mut app);
     app.remote_model_options.push(crate::provider::ModelRoute {
@@ -1822,25 +1827,24 @@ fn test_model_picker_effort_variants_follow_each_route_vocabulary() {
         .inline_interactive_state
         .as_ref()
         .expect("model picker should be open");
-    let has_route_effort = |api_method: &str, effort: &str| {
-        picker.entries.iter().any(|entry| {
-            entry.name.starts_with("gpt-5.5 (")
-                && entry.effort.as_deref() == Some(effort)
-                && entry
-                    .options
-                    .first()
-                    .is_some_and(|route| route.api_method == api_method)
-        })
+    let route_rows = |api_method: &str| {
+        picker
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry.name == "gpt-5.5"
+                    && entry.effort.is_none()
+                    && entry
+                        .options
+                        .first()
+                        .is_some_and(|route| route.api_method == api_method)
+            })
+            .count()
     };
 
-    assert!(has_route_effort("openai-oauth", "max"));
-    assert!(has_route_effort("openai-oauth", "minimal"));
-    assert!(has_route_effort("openrouter", "xhigh"));
-    assert!(has_route_effort("openrouter", "minimal"));
-    assert!(
-        !has_route_effort("openrouter", "max"),
-        "OpenRouter must not advertise max as a distinct rung because it aliases xhigh"
-    );
+    assert_eq!(route_rows("openai-oauth"), 1);
+    assert_eq!(route_rows("openrouter"), 1);
+    assert!(!picker.entries.iter().any(|entry| entry.name.starts_with("gpt-5.5 (")));
 }
 
 /// Plain model rows (no effort suffix) must not stage a reasoning effort.
