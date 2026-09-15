@@ -126,6 +126,27 @@ fn runtime_cursor_api_key_reads_env() {
     }
 }
 
+#[test]
+fn imported_cursor_retry_only_rotates_for_account_failures() {
+    let auth_error = anyhow::anyhow!("HTTP 401 unauthorized");
+    let rate_limit_error = anyhow::anyhow!("HTTP 429 rate limit");
+    let network_error = anyhow::anyhow!("connection reset by peer");
+
+    assert!(should_rotate_imported_cursor_account(
+        Some("cursor-a"),
+        &auth_error
+    ));
+    assert!(should_rotate_imported_cursor_account(
+        Some("cursor-a"),
+        &rate_limit_error
+    ));
+    assert!(!should_rotate_imported_cursor_account(
+        Some("cursor-a"),
+        &network_error
+    ));
+    assert!(!should_rotate_imported_cursor_account(None, &auth_error));
+}
+
 // ==========================================================================
 // Phase 07 Wire Codec & Contract Tests (Plan 07-01)
 // ==========================================================================

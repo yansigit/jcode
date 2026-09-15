@@ -271,6 +271,24 @@ enum CursorModelsAuth<'a> {
     Bearer(&'a str),
 }
 
+const CURSOR_IMPORTED_PROVIDER: &str = "cursor";
+
+/// Select managed-account state before resolving credentials. Token refreshes
+/// and non-imported auth sources remain handled by the existing resolver.
+async fn resolve_cursor_tokens(
+    client: &reqwest::Client,
+) -> Result<(cursor_auth::CursorDirectTokens, Option<String>)> {
+    let tokens = cursor_auth::resolve_direct_tokens(client).await?;
+    let account_id = tokens.account_id.clone();
+    Ok((tokens, account_id))
+}
+
+fn should_rotate_imported_cursor_account(account_id: Option<&str>, error: &anyhow::Error) -> bool {
+    account_id.is_some()
+        && (cursor_auth::error_indicates_not_logged_in(error)
+            || jcode_base::auth::imported_pool::is_rotatable_error(&format!("{error:#}")))
+}
+
 async fn fetch_available_models(
     client: &reqwest::Client,
     auth: CursorModelsAuth<'_>,
@@ -358,6 +376,76 @@ async fn fetch_agent_models(client: &reqwest::Client, access_token: &str) -> Res
         body.extend_from_slice(&chunk);
     }
     decode_agent_models(&body)
+}
+
+async fn fetch_cursor_catalog_once(
+    client: &reqwest::Client,
+    tokens: &cursor_auth::CursorDirectTokens,
+) -> Result<Vec<String>> {
+    match fetch_agent_models(client, &tokens.access_token).await {
+        Ok(models) if !models.is_empty() => Ok(models),
+        Ok(_) => {
+            fetch_available_models(client, CursorModelsAuth::Bearer(&tokens.access_token)).await
+        }
+        Err(agent_error) => {
+            fetch_available_models(client, CursorModelsAuth::Bearer(&tokens.access_token))
+                .await
+                .with_context(|| format!("AgentService discovery also failed: {agent_error:#}"))
+        }
+    }
+}
+
+/// Try one alternate imported account only for authentication/rate-limit
+/// failures. This keeps discovery bounded and leaves ordinary failures alone.
+async fn fetch_cursor_catalog_with_rotation(client: &reqwest::Client) -> Result<Vec<String>> {
+    let (tokens, account_id) = resolve_cursor_tokens(client).await?;
+    let first_result = fetch_cursor_catalog_once(client, &tokens).await;
+
+    match first_result {
+        Ok(models) => {
+            if let Some(account_id) = account_id.as_deref() {
+                let _ = jcode_base::auth::imported_pool::record_success(
+                    CURSOR_IMPORTED_PROVIDER,
+                    account_id,
+                );
+            }
+            Ok(models)
+        }
+        Err(error) if should_rotate_imported_cursor_account(account_id.as_deref(), &error) => {
+            let account_id = account_id.expect("guarded by is_some");
+            let error_text = format!("{error:#}");
+            let Some(next_account) = jcode_base::auth::imported_pool::rotate_to_next_account(
+                CURSOR_IMPORTED_PROVIDER,
+                &account_id,
+                &error_text,
+            )?
+            else {
+                return Err(error);
+            };
+            let retry_tokens = cursor_auth::resolve_direct_tokens(client).await?;
+            let retry_result = fetch_cursor_catalog_once(client, &retry_tokens).await;
+            match &retry_result {
+                Ok(_) => {
+                    let _ = jcode_base::auth::imported_pool::record_success(
+                        CURSOR_IMPORTED_PROVIDER,
+                        &next_account.account_id,
+                    );
+                }
+                Err(retry_error) => {
+                    let retry_error_text = format!("{retry_error:#}");
+                    if jcode_base::auth::imported_pool::is_rotatable_error(&retry_error_text) {
+                        let _ = jcode_base::auth::imported_pool::record_failure(
+                            CURSOR_IMPORTED_PROVIDER,
+                            &next_account.account_id,
+                            &retry_error_text,
+                        );
+                    }
+                }
+            }
+            retry_result
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn runtime_cursor_api_key() -> Option<String> {
@@ -643,27 +731,9 @@ impl Provider for CursorCliProvider {
         let fetched = if let Some(api_key) = runtime_cursor_api_key() {
             fetch_available_models(&self.client, CursorModelsAuth::ApiKey(&api_key)).await
         } else {
-            match cursor_auth::resolve_direct_tokens(&self.client).await {
-                Ok(tokens) => match fetch_agent_models(&self.client, &tokens.access_token).await {
-                    Ok(models) if !models.is_empty() => Ok(models),
-                    Ok(_) => {
-                        fetch_available_models(
-                            &self.client,
-                            CursorModelsAuth::Bearer(&tokens.access_token),
-                        )
-                        .await
-                    }
-                    Err(agent_error) => fetch_available_models(
-                        &self.client,
-                        CursorModelsAuth::Bearer(&tokens.access_token),
-                    )
-                    .await
-                    .with_context(|| {
-                        format!("AgentService discovery also failed: {agent_error:#}")
-                    }),
-                },
-                Err(error) => Err(error).context("no Cursor API key or OAuth credentials"),
-            }
+            fetch_cursor_catalog_with_rotation(&self.client)
+                .await
+                .context("no Cursor API key or OAuth credentials")
         };
 
         match fetched {
@@ -729,7 +799,7 @@ async fn run_native_text_command(
     system: &str,
     mut tool_result_rx: mpsc::Receiver<NativeToolResult>,
 ) -> Result<()> {
-    let tokens = cursor_auth::resolve_direct_tokens(&client).await?;
+    let (tokens, imported_account_id) = resolve_cursor_tokens(&client).await?;
 
     // The current Cursor agent transport (`agent.v1.AgentService/Run`) is a
     // paced bidirectional Connect/HTTP2 stream. The old
@@ -749,14 +819,70 @@ async fn run_native_text_command(
     .await;
 
     match first_result {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            if let Some(account_id) = imported_account_id.as_deref() {
+                let _ = jcode_base::auth::imported_pool::record_success(
+                    CURSOR_IMPORTED_PROVIDER,
+                    account_id,
+                );
+            }
+            Ok(())
+        }
+        Err(err) if should_rotate_imported_cursor_account(imported_account_id.as_deref(), &err) => {
+            let failed_account_id = imported_account_id.expect("guarded by is_some");
+            let error_text = if cursor_auth::error_indicates_not_logged_in(&err) {
+                format!("authentication: {err:#}")
+            } else {
+                format!("{err:#}")
+            };
+            let Some(next_account) = jcode_base::auth::imported_pool::rotate_to_next_account(
+                CURSOR_IMPORTED_PROVIDER,
+                &failed_account_id,
+                &error_text,
+            )?
+            else {
+                return Err(err);
+            };
+            let retry_tokens = cursor_auth::resolve_direct_tokens(&client).await?;
+            let retry_result = crate::agent_transport::run_agent_turn(
+                &retry_tokens.access_token,
+                prompt,
+                model,
+                resume_session_id,
+                stream_uuid,
+                tools,
+                system,
+                &mut tool_result_rx,
+                tx,
+            )
+            .await;
+            match &retry_result {
+                Ok(()) => {
+                    let _ = jcode_base::auth::imported_pool::record_success(
+                        CURSOR_IMPORTED_PROVIDER,
+                        &next_account.account_id,
+                    );
+                }
+                Err(retry_error) => {
+                    let retry_error_text = format!("{retry_error:#}");
+                    if jcode_base::auth::imported_pool::is_rotatable_error(&retry_error_text) {
+                        let _ = jcode_base::auth::imported_pool::record_failure(
+                            CURSOR_IMPORTED_PROVIDER,
+                            &next_account.account_id,
+                            &retry_error_text,
+                        );
+                    }
+                }
+            }
+            retry_result
+        }
         Err(err) if cursor_auth::error_indicates_not_logged_in(&err) => {
             let refreshed = cursor_auth::refresh_resolved_tokens(&client, &tokens)
                 .await
                 .with_context(|| {
                     format!("Cursor token was rejected and refresh also failed after: {err:#}")
                 })?;
-            crate::agent_transport::run_agent_turn(
+            let result = crate::agent_transport::run_agent_turn(
                 &refreshed.access_token,
                 prompt,
                 model,
@@ -767,7 +893,16 @@ async fn run_native_text_command(
                 &mut tool_result_rx,
                 tx,
             )
-            .await
+            .await;
+            if result.is_ok()
+                && let Some(account_id) = imported_account_id.as_deref()
+            {
+                let _ = jcode_base::auth::imported_pool::record_success(
+                    CURSOR_IMPORTED_PROVIDER,
+                    account_id,
+                );
+            }
+            result
         }
         Err(err) => Err(err),
     }

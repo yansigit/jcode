@@ -233,6 +233,54 @@ fn load_access_token_from_auth_file_does_not_change_external_permissions() {
 }
 
 #[test]
+fn active_imported_cursor_account_precedes_local_auth_and_preserves_identity() {
+    let _guard = crate::storage::lock_test_env();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    let previous_access = std::env::var_os("CURSOR_ACCESS_TOKEN");
+    let temp = TempDir::new().unwrap();
+    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::env::remove_var("CURSOR_ACCESS_TOKEN");
+
+    let auth_path = cursor_auth_file_path().expect("cursor auth path");
+    std::fs::create_dir_all(auth_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &auth_path,
+        r#"{"accessToken":"local-cursor-token","refreshToken":"local-refresh"}"#,
+    )
+    .unwrap();
+    crate::auth::imported_pool::import_opencodex_accounts(&serde_json::json!({
+        "cursor": {
+            "activeAccountId": "imported-account",
+            "accounts": [{
+                "id": "imported-account",
+                "credential": {"access": "imported-cursor-token", "refresh": "imported-refresh"}
+            }]
+        }
+    }))
+    .unwrap();
+
+    let tokens = load_access_token_from_env_or_file().expect("imported Cursor token");
+    assert_eq!(tokens.access_token, "imported-cursor-token");
+    assert_eq!(tokens.account_id.as_deref(), Some("imported-account"));
+
+    crate::env::set_var("CURSOR_ACCESS_TOKEN", "explicit-cursor-token");
+    let explicit = load_access_token_from_env_or_file().expect("explicit Cursor token");
+    assert_eq!(explicit.access_token, "explicit-cursor-token");
+    assert_eq!(explicit.account_id, None);
+
+    if let Some(previous_home) = previous_home {
+        crate::env::set_var("JCODE_HOME", previous_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    if let Some(previous_access) = previous_access {
+        crate::env::set_var("CURSOR_ACCESS_TOKEN", previous_access);
+    } else {
+        crate::env::remove_var("CURSOR_ACCESS_TOKEN");
+    }
+}
+
+#[test]
 fn reads_cursor_state_with_embedded_sqlite() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("state.vscdb");

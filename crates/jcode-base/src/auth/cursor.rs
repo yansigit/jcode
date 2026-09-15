@@ -50,6 +50,7 @@ pub struct CursorDirectTokens {
     pub access_token: String,
     pub refresh_token: Option<String>,
     pub source: &'static str,
+    pub account_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -371,8 +372,21 @@ pub fn load_access_token_from_env_or_file() -> Result<CursorDirectTokens> {
                 access_token,
                 refresh_token,
                 source: "env",
+                account_id: None,
             });
         }
+    }
+
+    // An imported account switch must take precedence over local Cursor IDE
+    // credentials. Keep the environment token branch above as the explicit
+    // override for unattended deployments.
+    if let Some(account) = crate::auth::imported_pool::active_or_next_eligible_account("cursor") {
+        return Ok(CursorDirectTokens {
+            access_token: account.access_token,
+            refresh_token: account.refresh_token,
+            source: "opencodex_auth",
+            account_id: Some(account.account_id),
+        });
     }
 
     let file_path = cursor_auth_file_path()?;
@@ -399,6 +413,7 @@ pub fn load_access_token_from_env_or_file() -> Result<CursorDirectTokens> {
                     .map(|token| token.trim().to_string())
                     .filter(|token| !token.is_empty()),
                 source: "cursor_auth_file",
+                account_id: None,
             });
         }
     }
@@ -408,6 +423,7 @@ pub fn load_access_token_from_env_or_file() -> Result<CursorDirectTokens> {
             access_token: tokens.access_token,
             refresh_token: Some(tokens.refresh_token),
             source: "opencodex_auth",
+            account_id: None,
         });
     }
 
@@ -418,6 +434,55 @@ pub fn load_access_token_from_env_or_file() -> Result<CursorDirectTokens> {
 
 /// Resolve the best available direct-auth credentials for Cursor's native API.
 pub async fn resolve_direct_tokens(client: &Client) -> Result<CursorDirectTokens> {
+    // An explicitly supplied token always wins. Managed imported accounts are
+    // intentionally preferred over Cursor's local auth.json and IDE state so
+    // account-picker switches affect native requests as well as catalog fetches.
+    if std::env::var("CURSOR_ACCESS_TOKEN")
+        .ok()
+        .is_some_and(|token| !token.trim().is_empty())
+    {
+        if let Ok(tokens) = load_access_token_from_env_or_file() {
+            if !token_is_expiring_soon(&tokens.access_token) {
+                return Ok(tokens);
+            }
+            if let Some(refresh_token) = tokens.refresh_token.as_deref()
+                && let Ok(refreshed) = refresh_direct_access_token(client, refresh_token).await
+            {
+                return Ok(CursorDirectTokens {
+                    source: tokens.source,
+                    account_id: tokens.account_id,
+                    ..refreshed
+                });
+            }
+        }
+    }
+
+    if let Some(account) = crate::auth::imported_pool::active_or_next_eligible_account("cursor") {
+        let imported = CursorDirectTokens {
+            access_token: account.access_token,
+            refresh_token: account.refresh_token,
+            source: "opencodex_auth",
+            account_id: Some(account.account_id),
+        };
+        if !token_is_expiring_soon(&imported.access_token) {
+            return Ok(imported);
+        }
+        if let Some(refresh_token) = imported.refresh_token.as_deref()
+            && let Ok(mut refreshed) = refresh_direct_access_token(client, refresh_token).await
+        {
+            refreshed.source = imported.source;
+            refreshed.account_id = imported.account_id.clone();
+            let _ = crate::auth::imported_pool::update_tokens(
+                "cursor",
+                imported.account_id.as_deref().unwrap_or_default(),
+                &refreshed.access_token,
+                refreshed.refresh_token.as_deref(),
+                None,
+            );
+            return Ok(refreshed);
+        }
+    }
+
     if let Ok(tokens) = load_access_token_from_env_or_file() {
         if !token_is_expiring_soon(&tokens.access_token) {
             return Ok(tokens);
@@ -427,6 +492,7 @@ pub async fn resolve_direct_tokens(client: &Client) -> Result<CursorDirectTokens
         {
             return Ok(CursorDirectTokens {
                 source: tokens.source,
+                account_id: tokens.account_id,
                 ..refreshed
             });
         }
@@ -449,6 +515,7 @@ pub async fn resolve_direct_tokens(client: &Client) -> Result<CursorDirectTokens
                 access_token,
                 refresh_token,
                 source: "cursor_vscdb",
+                account_id: None,
             });
         }
         if let Some(refresh_token) = refresh_token.as_deref()
@@ -456,6 +523,7 @@ pub async fn resolve_direct_tokens(client: &Client) -> Result<CursorDirectTokens
         {
             return Ok(CursorDirectTokens {
                 source: "cursor_vscdb",
+                account_id: None,
                 ..refreshed
             });
         }
@@ -465,6 +533,7 @@ pub async fn resolve_direct_tokens(client: &Client) -> Result<CursorDirectTokens
     let exchanged = exchange_api_key_for_tokens(client, &api_key).await?;
     Ok(CursorDirectTokens {
         source: "cursor_api_key",
+        account_id: None,
         ..exchanged
     })
 }
@@ -480,8 +549,18 @@ pub async fn refresh_resolved_tokens(
         .context("Cursor token was rejected and no refresh token is available")?;
     let mut refreshed = refresh_direct_access_token(client, refresh_token).await?;
     refreshed.source = tokens.source;
+    refreshed.account_id = tokens.account_id.clone();
     if tokens.source == "cursor_auth_file" {
         let _ = save_auth_file_tokens(&refreshed);
+    }
+    if let Some(account_id) = tokens.account_id.as_deref() {
+        let _ = crate::auth::imported_pool::update_tokens(
+            "cursor",
+            account_id,
+            &refreshed.access_token,
+            refreshed.refresh_token.as_deref(),
+            None,
+        );
     }
     Ok(refreshed)
 }
@@ -575,6 +654,7 @@ async fn refresh_direct_access_token(
                 .refresh_token
                 .or_else(|| Some(refresh_token.to_string())),
             source: "cursor_refresh",
+            account_id: None,
         })
     }
     .await;
@@ -614,6 +694,7 @@ async fn exchange_api_key_for_tokens(client: &Client, api_key: &str) -> Result<C
         access_token: parsed.access_token,
         refresh_token: parsed.refresh_token,
         source: "cursor_api_key",
+        account_id: None,
     })
 }
 
