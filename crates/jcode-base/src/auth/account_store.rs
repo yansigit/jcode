@@ -1,7 +1,7 @@
 use anyhow::Result;
 use serde::Serialize;
-use std::path::Path;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, LazyLock, Mutex as StdMutex, RwLock, Weak};
 
 static FILE_MUTEXES: LazyLock<StdMutex<HashMap<String, Weak<StdMutex<()>>>>> =
@@ -24,9 +24,7 @@ fn account_file_lock(path: &Path) -> Arc<StdMutex<()>> {
 /// Save credentials atomically while serializing writers in this process.
 pub fn write_json_secret_locked<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<()> {
     let lock = account_file_lock(path);
-    let _guard = lock
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     jcode_storage::write_json_secret(path, value)
 }
 

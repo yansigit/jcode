@@ -752,8 +752,16 @@ fn request_context_result_preserves_correlation_ids() {
     assert_eq!(fields.len(), 1);
     assert_eq!(fields[0].field, 2);
     let exec_fields: Vec<_> = wire::iter_fields(fields[0].data).collect();
-    assert!(exec_fields.iter().any(|field| field.field == 1 && field.varint == 7));
-    assert!(exec_fields.iter().any(|field| field.field == 15 && field.data == b"exec"));
+    assert!(
+        exec_fields
+            .iter()
+            .any(|field| field.field == 1 && field.varint == 7)
+    );
+    assert!(
+        exec_fields
+            .iter()
+            .any(|field| field.field == 15 && field.data == b"exec")
+    );
     assert!(exec_fields.iter().any(|field| field.field == 10));
 }
 

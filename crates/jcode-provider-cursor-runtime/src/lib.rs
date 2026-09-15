@@ -376,11 +376,7 @@ impl ToolResultMultiplexer {
         }
     }
 
-    pub fn register(
-        &self,
-        stream_uuid: &str,
-        tx: mpsc::Sender<NativeToolResult>,
-    ) -> StreamGuard {
+    pub fn register(&self, stream_uuid: &str, tx: mpsc::Sender<NativeToolResult>) -> StreamGuard {
         if let Ok(mut routes) = self.routes.lock() {
             routes.insert(stream_uuid.to_string(), tx);
         }
@@ -733,7 +729,14 @@ async fn run_native_text_command(
     system: &str,
     mut tool_result_rx: mpsc::Receiver<NativeToolResult>,
 ) -> Result<()> {
-    let tokens = cursor_auth::resolve_direct_tokens(&client).await?;
+    let tokens = match account_label {
+        Some(label) => {
+            let account = jcode_base::auth::provider_pool::account("cursor", label)?
+                .with_context(|| format!("No Cursor account with label '{label}'"))?;
+            cursor_auth::resolve_direct_tokens_for_account(&client, &account).await?
+        }
+        None => cursor_auth::resolve_direct_tokens(&client).await?,
+    };
 
     // The current Cursor agent transport (`agent.v1.AgentService/Run`) is a
     // paced bidirectional Connect/HTTP2 stream. The old
