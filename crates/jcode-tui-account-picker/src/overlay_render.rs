@@ -42,6 +42,9 @@ pub(super) enum ActionSection {
 }
 
 pub(super) fn action_section(item: &AccountPickerItem) -> ActionSection {
+    if item.title.starts_with("Imported account `") {
+        return ActionSection::Switch;
+    }
     match &item.command {
         AccountPickerCommand::OpenAccountCenter { .. } => ActionSection::Overview,
         AccountPickerCommand::OpenAddReplaceFlow { .. } => ActionSection::Add,
@@ -74,7 +77,12 @@ pub(super) fn account_is_active(item: &AccountPickerItem) -> bool {
 }
 
 fn extract_account_label(title: &str) -> Option<String> {
-    let prefixes = ["Switch account `", "Re-login account `", "Remove account `"];
+    let prefixes = [
+        "Switch account `",
+        "Re-login account `",
+        "Remove account `",
+        "Imported account `",
+    ];
     for prefix in prefixes {
         if let Some(rest) = title.strip_prefix(prefix)
             && let Some(label) = rest.strip_suffix('`')

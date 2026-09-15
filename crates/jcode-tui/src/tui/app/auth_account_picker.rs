@@ -109,6 +109,40 @@ impl App {
                 _ => {}
             }
 
+            let imported_providers: &[&str] = match provider.id {
+                "openai" => &["command-code", "openai"],
+                "antigravity" => &["google-antigravity", "antigravity"],
+                id => &[id],
+            };
+            for source_provider in imported_providers {
+                let imported = crate::auth::imported_pool::list_provider(source_provider);
+                if imported.is_empty() {
+                    continue;
+                }
+                for account in imported {
+                    let state = if account
+                        .expires_at
+                        .map(|expires| expires > chrono::Utc::now().timestamp_millis())
+                        .unwrap_or(true)
+                    {
+                        "ready"
+                    } else {
+                        "expired"
+                    };
+                    items.push(AccountPickerItem::action(
+                        provider.id,
+                        provider.display_name,
+                        format!("Imported account `{}`", account.label),
+                        format!("{state} · Open-Codex import · id {}", account.account_id),
+                        AccountPickerCommand::SubmitInput(format!(
+                            "/account {} settings",
+                            provider.id
+                        )),
+                    ));
+                }
+                break;
+            }
+
             let state_label = match auth_state {
                 crate::auth::AuthState::Available => "ready",
                 crate::auth::AuthState::Expired => "needs attention",
