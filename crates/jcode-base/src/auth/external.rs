@@ -119,11 +119,31 @@ const SOURCES: [ExternalAuthSource; 4] = [
     ExternalAuthSource::Hermes,
 ];
 
+fn managed_snapshot_path(source: ExternalAuthSource) -> Result<PathBuf> {
+    let filename = match source {
+        ExternalAuthSource::OpenCode => "opencode_auth.json",
+        ExternalAuthSource::Pi => "pi_auth.json",
+        ExternalAuthSource::OpenClaw => "openclaw_auth.json",
+        ExternalAuthSource::Hermes => "hermes_auth.json",
+    };
+    Ok(crate::storage::app_config_dir()?
+        .join("imported_auth")
+        .join(filename))
+}
+
 pub fn trust_external_auth_source(source: ExternalAuthSource) -> Result<()> {
-    crate::config::Config::allow_external_auth_source_for_path(
-        source.source_id(),
-        &source.path()?,
-    )?;
+    let source_path = source.path()?;
+    crate::config::Config::allow_external_auth_source_for_path(source.source_id(), &source_path)?;
+
+    let raw = std::fs::read_to_string(&source_path)
+        .with_context(|| format!("Failed to read {}", source_path.display()))?;
+    let value: Value = serde_json::from_str(&raw)
+        .with_context(|| format!("Failed to parse {}", source_path.display()))?;
+    let snapshot = managed_snapshot_path(source)?;
+    if let Some(parent) = snapshot.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    crate::storage::write_json_secret(&snapshot, &value)?;
     super::AuthStatus::invalidate_cache();
     Ok(())
 }
@@ -366,7 +386,12 @@ fn load_api_key_from_source(source: ExternalAuthSource, env_key: &str) -> Option
 }
 
 fn load_auth_map(source: ExternalAuthSource) -> Result<HashMap<String, Value>> {
-    let path = crate::storage::validate_external_auth_file(&source.path()?)?;
+    let managed = managed_snapshot_path(source)?;
+    let path = if managed.is_file() {
+        managed
+    } else {
+        crate::storage::validate_external_auth_file(&source.path()?)?
+    };
     let raw = std::fs::read_to_string(&path)
         .with_context(|| format!("Failed to read {}", path.display()))?;
     let value: Value = serde_json::from_str(&raw)
