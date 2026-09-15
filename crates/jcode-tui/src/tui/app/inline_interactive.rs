@@ -4751,6 +4751,17 @@ mod tests {
                 .iter()
                 .any(|option| { option.model.as_deref() == Some("gpt-5.5-extra-high-fast") })
         );
+
+        let picker = app.inline_interactive_state.as_mut().unwrap();
+        picker.filter = "gpt-5.5-extra-high-fast".to_string();
+        App::apply_inline_interactive_filter(picker);
+        assert!(
+            picker
+                .filtered
+                .iter()
+                .any(|&index| picker.entries[index].name == "gpt-5.5"),
+            "an exact grouped wire id should find its base family row"
+        );
     }
 
     #[test]
