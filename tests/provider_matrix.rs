@@ -213,7 +213,10 @@ fn openai_compatible_login_providers(
 ) -> Vec<LoginProviderDescriptor> {
     providers
         .into_iter()
-        .filter(|provider| matches!(provider.target, LoginProviderTarget::OpenAiCompatible(_)))
+        .filter(|provider| {
+            matches!(provider.target, LoginProviderTarget::OpenAiCompatible(_))
+                && choice_for_login_provider(*provider).is_some()
+        })
         .collect()
 }
 
