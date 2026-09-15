@@ -41,7 +41,7 @@ enum CatalogSource {
 pub struct CopilotApiProvider {
     client: reqwest::Client,
     model: Arc<RwLock<String>>,
-    github_token: String,
+    github_token: Arc<RwLock<String>>,
     bearer_token: Arc<tokio::sync::RwLock<Option<copilot_auth::CopilotApiToken>>>,
     fetched_models: Arc<RwLock<Vec<String>>>,
     catalog_source: Arc<RwLock<CatalogSource>>,
@@ -165,7 +165,7 @@ impl CopilotApiProvider {
         let provider = Self {
             client: jcode_provider_core::shared_http_client(),
             model: Arc::new(RwLock::new(model)),
-            github_token,
+            github_token: Arc::new(RwLock::new(github_token)),
             bearer_token: Arc::new(tokio::sync::RwLock::new(None)),
             fetched_models: Arc::new(RwLock::new(Vec::new())),
             catalog_source: Arc::new(RwLock::new(CatalogSource::None)),
@@ -201,7 +201,7 @@ impl CopilotApiProvider {
         let provider = Self {
             client: jcode_provider_core::shared_http_client(),
             model: Arc::new(RwLock::new(model)),
-            github_token,
+            github_token: Arc::new(RwLock::new(github_token)),
             bearer_token: Arc::new(tokio::sync::RwLock::new(None)),
             fetched_models: Arc::new(RwLock::new(Vec::new())),
             catalog_source: Arc::new(RwLock::new(CatalogSource::None)),
@@ -427,8 +427,12 @@ impl CopilotApiProvider {
         }
 
         // Need to refresh
-        let new_token =
-            copilot_auth::exchange_github_token(&self.client, &self.github_token).await?;
+        let github_token = self
+            .github_token
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let new_token = copilot_auth::exchange_github_token(&self.client, &github_token).await?;
         let token_str = new_token.token.clone();
         *self.bearer_token.write().await = Some(new_token);
         Ok(token_str)
@@ -1108,6 +1112,30 @@ impl Provider for CopilotApiProvider {
         }
         self.detect_tier_and_set_default().await;
         Ok(())
+    }
+
+    async fn invalidate_credentials(&self) {
+        // The imported Open-Codex pool can change the GitHub OAuth account
+        // without rebuilding this runtime. Drop both token layers and the old
+        // account's model list before the post-auth refresh starts.
+        copilot_auth::invalidate_github_token_cache();
+        if let Ok(github_token) = copilot_auth::load_github_token() {
+            *self
+                .github_token
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = github_token;
+        }
+        *self.bearer_token.write().await = None;
+        self.fetched_models
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        *self
+            .catalog_source
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = CatalogSource::None;
+        self.init_done
+            .store(false, std::sync::atomic::Ordering::Release);
     }
 
     fn supports_compaction(&self) -> bool {

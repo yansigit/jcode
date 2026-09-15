@@ -1329,6 +1329,16 @@ fn spawn_account_switch_refresh(
         crate::provider::clear_all_provider_unavailability_for_account();
         crate::provider::clear_all_model_unavailability_for_account();
 
+        // Account selection changes the credential behind dynamic catalogs too.
+        // Refresh before publishing the switch snapshot so OpenAI/Anthropic
+        // account changes do not leave the picker on the previous account's
+        // model publication indefinitely.
+        if let Err(error) = provider.refresh_model_catalog().await {
+            crate::logging::warn(&format!(
+                "Account switch model catalog refresh failed for {provider_kind}: {error}"
+            ));
+        }
+
         match provider_kind {
             "anthropic" => {
                 tokio::spawn(async {

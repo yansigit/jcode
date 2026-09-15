@@ -4,7 +4,7 @@ fn make_test_provider(fetched: Vec<String>) -> CopilotApiProvider {
     CopilotApiProvider {
         client: jcode_base::provider::shared_http_client(),
         model: Arc::new(RwLock::new(DEFAULT_MODEL.to_string())),
-        github_token: "test-token".to_string(),
+        github_token: Arc::new(RwLock::new("test-token".to_string())),
         bearer_token: Arc::new(tokio::sync::RwLock::new(None)),
         fetched_models: Arc::new(RwLock::new(fetched)),
         catalog_source: Arc::new(RwLock::new(CatalogSource::Live)),

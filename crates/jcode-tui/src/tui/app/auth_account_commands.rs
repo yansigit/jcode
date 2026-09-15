@@ -352,12 +352,15 @@ pub(crate) fn account_command_from_picker(
             provider_id: provider_id(provider),
             label: label.clone(),
         }),
-        AccountPickerCommand::SwitchProvider { provider_id, label } => {
-            Some(AccountCommand::Switch {
-                provider_id: provider_id.clone(),
-                label: label.clone(),
-            })
-        }
+        AccountPickerCommand::SwitchProvider {
+            provider_id,
+            source_provider,
+            label,
+        } => Some(AccountCommand::SwitchImported {
+            provider_id: provider_id.clone(),
+            source_provider: source_provider.clone(),
+            label: label.clone(),
+        }),
         AccountPickerCommand::Login { provider, label } => Some(AccountCommand::Add {
             provider_id: provider_id(provider),
             label: Some(label.clone()),
@@ -415,6 +418,11 @@ pub(crate) fn execute_account_command_local(app: &mut App, command: AccountComma
                 match crate::auth::imported_pool::set_active(source, &label) {
                     Ok(()) => {
                         crate::auth::AuthStatus::invalidate_cache();
+                        // Imported Open-Codex accounts are selected in the
+                        // managed pool, so notify the live provider runtime to
+                        // discard its credential/catalog state and republish
+                        // routes for the newly selected account.
+                        app.provider.on_auth_changed();
                         app.set_status_notice(format!("Switched {provider_id} imported account"));
                     }
                     Err(error) => {
@@ -426,6 +434,18 @@ pub(crate) fn execute_account_command_local(app: &mut App, command: AccountComma
                 "Provider {} does not support account switching.",
                 provider_id
             ))),
+        },
+        AccountCommand::SwitchImported {
+            provider_id,
+            source_provider,
+            label,
+        } => match crate::auth::imported_pool::set_active(&source_provider, &label) {
+            Ok(()) => {
+                crate::auth::AuthStatus::invalidate_cache();
+                app.provider.on_auth_changed();
+                app.set_status_notice(format!("Switched {provider_id} imported account"));
+            }
+            Err(error) => app.push_display_message(DisplayMessage::error(error.to_string())),
         },
         AccountCommand::SwitchShorthand { label } => app.switch_account_by_label(&label),
         AccountCommand::Remove { provider_id, label } => match provider_id.as_str() {
@@ -518,8 +538,27 @@ pub(crate) async fn execute_account_command_remote(
                 )));
                 app.set_status_notice(format!("OpenAI account: switched to {}", label));
             }
-            _ => execute_account_command_local(app, AccountCommand::Switch { provider_id, label }),
+            _ => {
+                let provider_id_for_refresh = provider_id.clone();
+                execute_account_command_local(app, AccountCommand::Switch { provider_id, label });
+                remote.notify_auth_changed_for_provider_detached(Some(&provider_id_for_refresh));
+            }
         },
+        AccountCommand::SwitchImported {
+            provider_id,
+            source_provider,
+            label,
+        } => {
+            execute_account_command_local(
+                app,
+                AccountCommand::SwitchImported {
+                    provider_id: provider_id.clone(),
+                    source_provider,
+                    label,
+                },
+            );
+            remote.notify_auth_changed_for_provider_detached(Some(&provider_id));
+        }
         AccountCommand::SwitchShorthand { label } => {
             let has_anthropic = crate::auth::claude::list_accounts()
                 .unwrap_or_default()
@@ -1231,12 +1270,18 @@ mod tests {
     fn provider_neutral_picker_switch_maps_without_string_reparsing() {
         let command = crate::tui::account_picker::AccountPickerCommand::SwitchProvider {
             provider_id: "cursor".to_string(),
+            source_provider: "cursor".to_string(),
             label: "cursor-account-2".to_string(),
         };
 
         match account_command_from_picker(&command) {
-            Some(AccountCommand::Switch { provider_id, label }) => {
+            Some(AccountCommand::SwitchImported {
+                provider_id,
+                source_provider,
+                label,
+            }) => {
                 assert_eq!(provider_id, "cursor");
+                assert_eq!(source_provider, "cursor");
                 assert_eq!(label, "cursor-account-2");
             }
             other => panic!("unexpected picker command mapping: {other:?}"),

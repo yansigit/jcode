@@ -33,12 +33,17 @@ impl ExternalAuthSource {
         }
     }
 
-    pub fn display_name(self) -> &'static str {
+    pub fn display_name(self) -> String {
         match self {
-            Self::OpenCode => "OpenCode auth.json",
-            Self::Pi => "pi auth.json",
-            Self::OpenClaw => "OpenClaw auth.json",
-            Self::Hermes => "Hermes auth.json",
+            Self::OpenCode => self
+                .path()
+                .ok()
+                .filter(|path| is_opencodex_auth_path(path))
+                .map(|_| "Open-Codex auth.json".to_string())
+                .unwrap_or_else(|| "OpenCode auth.json".to_string()),
+            Self::Pi => "pi auth.json".to_string(),
+            Self::OpenClaw => "OpenClaw auth.json".to_string(),
+            Self::Hermes => "Hermes auth.json".to_string(),
         }
     }
 
@@ -57,6 +62,13 @@ impl ExternalAuthSource {
             Self::Hermes => crate::storage::user_home_path(".hermes/auth.json"),
         }
     }
+}
+
+fn is_opencodex_auth_path(path: &std::path::Path) -> bool {
+    path.file_name().is_some_and(|name| name == "auth.json")
+        && path
+            .components()
+            .any(|component| component.as_os_str() == ".opencodex")
 }
 
 /// Resolve OpenClaw's credential file. OpenClaw has moved its auth store over
@@ -144,7 +156,7 @@ pub fn trust_external_auth_source(source: ExternalAuthSource) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     crate::storage::write_json_secret(&snapshot, &value)?;
-    if matches!(source, ExternalAuthSource::OpenCode) {
+    if matches!(source, ExternalAuthSource::OpenCode) && is_opencodex_auth_path(&source_path) {
         crate::auth::imported_pool::import_opencodex_accounts(&value)?;
     }
     super::AuthStatus::invalidate_cache();
@@ -168,8 +180,11 @@ pub fn unconsented_sources() -> Vec<ExternalAuthSource> {
 
 pub fn source_provider_labels(source: ExternalAuthSource) -> Vec<&'static str> {
     let mut labels = Vec::new();
-    if source_contains_oauth_provider(source, &["openai-codex", "openai_codex", "openai"])
-        .unwrap_or(false)
+    if source_contains_oauth_provider(
+        source,
+        &["command-code", "openai-codex", "openai_codex", "openai"],
+    )
+    .unwrap_or(false)
     {
         labels.push("OpenAI/Codex");
     }
@@ -188,6 +203,9 @@ pub fn source_provider_labels(source: ExternalAuthSource) -> Vec<&'static str> {
     }
     if source_contains_oauth_provider(source, &["github-copilot", "copilot"]).unwrap_or(false) {
         labels.push("GitHub Copilot");
+    }
+    if source_contains_oauth_provider(source, &["cursor"]).unwrap_or(false) {
+        labels.push("Cursor");
     }
     if source_contains_supported_api_key(source).unwrap_or(false) {
         labels.push("OpenRouter/API-key providers");
@@ -217,7 +235,12 @@ pub fn preferred_unconsented_api_key_source_for_env(env_key: &str) -> Option<Ext
 }
 
 pub fn preferred_unconsented_openai_oauth_source() -> Option<ExternalAuthSource> {
-    preferred_unconsented_oauth_source_for_candidates(&["openai-codex", "openai_codex", "openai"])
+    preferred_unconsented_oauth_source_for_candidates(&[
+        "command-code",
+        "openai-codex",
+        "openai_codex",
+        "openai",
+    ])
 }
 
 pub fn preferred_unconsented_anthropic_oauth_source() -> Option<ExternalAuthSource> {
@@ -249,7 +272,7 @@ pub fn load_api_key_for_env(env_key: &str) -> Option<String> {
 }
 
 pub fn load_openai_oauth_tokens() -> Option<ExternalOAuthTokens> {
-    load_oauth_tokens_for_candidates(&["openai-codex", "openai_codex", "openai"])
+    load_oauth_tokens_for_candidates(&["command-code", "openai-codex", "openai_codex", "openai"])
 }
 
 pub fn load_copilot_oauth_token() -> Option<String> {
@@ -275,17 +298,8 @@ pub fn load_anthropic_oauth_tokens() -> Option<ExternalOAuthTokens> {
 
 /// Load the active Cursor OAuth account imported from Open-Codex.
 pub fn load_cursor_oauth_tokens() -> Option<ExternalOAuthTokens> {
-    let imported = crate::auth::imported_pool::list_provider("cursor");
-    if let Some(account) = imported
-        .iter()
-        .find(|account| account.active)
-        .or_else(|| imported.first())
-    {
-        return Some(ExternalOAuthTokens {
-            access_token: account.access_token.clone(),
-            refresh_token: account.refresh_token.clone()?,
-            expires_at: account.expires_at.unwrap_or(i64::MAX),
-        });
+    if let Some(tokens) = load_active_imported_oauth_tokens(&["cursor"]) {
+        return Some(tokens);
     }
     let source = ExternalAuthSource::OpenCode;
     if !source_allowed(source) {
@@ -295,27 +309,89 @@ pub fn load_cursor_oauth_tokens() -> Option<ExternalOAuthTokens> {
     extract_oauth_tokens(source, &entry)
 }
 
-pub fn source_allowed(source: ExternalAuthSource) -> bool {
+/// Resolve the selected account from the managed Open-Codex import pool.
+///
+/// Open-Codex is an auth *source/configuration*, not a provider. Its nested
+/// provider account pools are copied into `imported_pool`; account-picker
+/// switches update that managed pool, while the original source file may keep
+/// advertising a different `activeAccountId`. Dynamic provider runtimes must
+/// consult this pool first or a switch appears successful but model fetches
+/// continue using the old credential.
+fn load_active_imported_oauth_tokens(provider_keys: &[&str]) -> Option<ExternalOAuthTokens> {
+    refresh_trusted_opencodex_import();
+    let imported = crate::auth::imported_pool::list();
+    let account = imported
+        .iter()
+        .filter(|account| provider_keys.contains(&account.provider.as_str()))
+        .find(|account| account.active)
+        .or_else(|| {
+            imported
+                .iter()
+                .find(|account| provider_keys.contains(&account.provider.as_str()))
+        })?;
+
+    let refresh_token = account.refresh_token.clone()?;
+    Some(ExternalOAuthTokens {
+        access_token: account.access_token.clone(),
+        refresh_token,
+        expires_at: account.expires_at.unwrap_or(i64::MAX),
+    })
+}
+
+/// Keep a trusted Open-Codex import synchronized with accounts added by the
+/// source application after approval. The pool merge preserves jcode's active
+/// account when it still exists, so this is safe to call on every credential
+/// resolution and remains idempotent.
+pub fn refresh_trusted_opencodex_import() {
+    let source = ExternalAuthSource::OpenCode;
     let Ok(path) = source.path() else {
-        return false;
+        return;
     };
-
-    if crate::config::Config::external_auth_source_allowed_for_path(source.source_id(), &path) {
-        return true;
+    if !is_opencodex_auth_path(&path) {
+        return;
     }
-
-    match source {
-        ExternalAuthSource::OpenCode => {
-            crate::config::Config::external_auth_source_allowed_for_path(
-                crate::auth::claude::OPENCODE_AUTH_SOURCE_ID,
-                &path,
-            )
-        }
-        ExternalAuthSource::Pi | ExternalAuthSource::OpenClaw | ExternalAuthSource::Hermes => false,
+    if !crate::config::Config::external_auth_source_allowed_for_path(source.source_id(), &path)
+        && !crate::config::Config::external_auth_source_allowed_for_path(
+            crate::auth::claude::OPENCODE_AUTH_SOURCE_ID,
+            &path,
+        )
+    {
+        return;
     }
+    let Ok(safe_path) = crate::storage::validate_external_auth_file(&path) else {
+        return;
+    };
+    let Ok(raw) = std::fs::read_to_string(&safe_path) else {
+        return;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&raw) else {
+        return;
+    };
+    let Ok(snapshot) = managed_snapshot_path(source) else {
+        return;
+    };
+    let pool_path = crate::storage::app_config_dir()
+        .ok()
+        .map(|dir| dir.join("imported_auth").join("account_pools.json"));
+    if pool_path.as_ref().is_some_and(|path| path.is_file())
+        && let Ok(previous_raw) = std::fs::read_to_string(&snapshot)
+        && let Ok(previous_value) = serde_json::from_str::<Value>(&previous_raw)
+        && previous_value == value
+    {
+        return;
+    }
+    if let Some(parent) = snapshot.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = crate::storage::write_json_secret(&snapshot, &value);
+    let _ = crate::auth::imported_pool::import_opencodex_accounts(&value);
 }
 
 fn load_oauth_tokens_for_candidates(provider_keys: &[&str]) -> Option<ExternalOAuthTokens> {
+    if let Some(tokens) = load_active_imported_oauth_tokens(provider_keys) {
+        return Some(tokens);
+    }
+
     let now_ms = chrono::Utc::now().timestamp_millis();
     let mut expired: Option<ExternalOAuthTokens> = None;
 
@@ -344,6 +420,26 @@ fn load_oauth_tokens_for_candidates(provider_keys: &[&str]) -> Option<ExternalOA
     expired
 }
 
+pub fn source_allowed(source: ExternalAuthSource) -> bool {
+    let Ok(path) = source.path() else {
+        return false;
+    };
+
+    if crate::config::Config::external_auth_source_allowed_for_path(source.source_id(), &path) {
+        return true;
+    }
+
+    match source {
+        ExternalAuthSource::OpenCode => {
+            crate::config::Config::external_auth_source_allowed_for_path(
+                crate::auth::claude::OPENCODE_AUTH_SOURCE_ID,
+                &path,
+            )
+        }
+        ExternalAuthSource::Pi | ExternalAuthSource::OpenClaw | ExternalAuthSource::Hermes => false,
+    }
+}
+
 fn preferred_unconsented_oauth_source_for_candidates(
     provider_keys: &[&str],
 ) -> Option<ExternalAuthSource> {
@@ -361,6 +457,7 @@ fn source_has_supported_auth(source: ExternalAuthSource) -> bool {
         || source_contains_oauth_provider(
             source,
             &[
+                "command-code",
                 "openai-codex",
                 "openai_codex",
                 "openai",
@@ -373,6 +470,7 @@ fn source_has_supported_auth(source: ExternalAuthSource) -> bool {
                 "antigravity",
                 "github-copilot",
                 "copilot",
+                "cursor",
             ],
         )
         .unwrap_or(false)
@@ -411,17 +509,21 @@ fn load_api_key_from_source(source: ExternalAuthSource, env_key: &str) -> Option
 }
 
 fn load_auth_map(source: ExternalAuthSource) -> Result<HashMap<String, Value>> {
+    if matches!(source, ExternalAuthSource::OpenCode) {
+        refresh_trusted_opencodex_import();
+    }
     let managed = managed_snapshot_path(source)?;
+    let source_path = source.path()?;
     let path = if managed.is_file() {
         managed
     } else {
-        crate::storage::validate_external_auth_file(&source.path()?)?
+        crate::storage::validate_external_auth_file(&source_path)?
     };
     let raw = std::fs::read_to_string(&path)
         .with_context(|| format!("Failed to read {}", path.display()))?;
     let value: Value = serde_json::from_str(&raw)
         .with_context(|| format!("Failed to parse {}", path.display()))?;
-    if matches!(source, ExternalAuthSource::OpenCode) {
+    if matches!(source, ExternalAuthSource::OpenCode) && is_opencodex_auth_path(&source_path) {
         // Older imports stored only the raw snapshot. Backfill the managed
         // provider pool lazily so upgrading does not require re-approving the
         // already trusted Open-Codex source.

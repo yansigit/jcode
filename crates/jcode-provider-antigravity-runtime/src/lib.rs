@@ -433,6 +433,158 @@ impl AntigravityProvider {
             .await
             .context("Failed to decode Antigravity generateContent response")
     }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "account rotation retries the same explicit request without changing provider semantics"
+    )]
+    async fn generate_content_with_account_retry(
+        &self,
+        model: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system: &str,
+        resume_session_id: Option<&str>,
+        force_function_call: bool,
+        signature_policy: jcode_provider_gemini::SignaturePolicy,
+    ) -> Result<CodeAssistGenerateResponse> {
+        let failed_account =
+            jcode_base::auth::imported_pool::active_or_next_eligible_account("google-antigravity")
+                .or_else(|| {
+                    jcode_base::auth::imported_pool::active_or_next_eligible_account("antigravity")
+                });
+        let first = self
+            .generate_content(
+                model,
+                messages,
+                tools,
+                system,
+                resume_session_id,
+                force_function_call,
+                signature_policy,
+            )
+            .await;
+
+        match first {
+            Ok(response) => {
+                if let Some(account) = failed_account {
+                    let _ = jcode_base::auth::imported_pool::record_success(
+                        &account.provider,
+                        &account.account_id,
+                    );
+                }
+                Ok(response)
+            }
+            Err(error)
+                if jcode_base::auth::imported_pool::is_rotatable_error(&format!("{error:#}"))
+                    && failed_account.is_some() =>
+            {
+                let failed_account = failed_account.expect("guarded by is_some");
+                let next = jcode_base::auth::imported_pool::rotate_to_next_account(
+                    &failed_account.provider,
+                    &failed_account.account_id,
+                    &error.to_string(),
+                )?;
+                let Some(next) = next else {
+                    return Err(error);
+                };
+
+                self.invalidate_credentials().await;
+                let retry = self
+                    .generate_content(
+                        model,
+                        messages,
+                        tools,
+                        system,
+                        resume_session_id,
+                        force_function_call,
+                        signature_policy,
+                    )
+                    .await;
+                match &retry {
+                    Ok(_) => {
+                        let _ = jcode_base::auth::imported_pool::record_success(
+                            &next.provider,
+                            &next.account_id,
+                        );
+                    }
+                    Err(retry_error)
+                        if jcode_base::auth::imported_pool::is_rotatable_error(&format!(
+                            "{retry_error:#}"
+                        )) =>
+                    {
+                        let _ = jcode_base::auth::imported_pool::record_failure(
+                            &next.provider,
+                            &next.account_id,
+                            &format!("{retry_error:#}"),
+                        );
+                    }
+                    Err(_) => {}
+                }
+                retry
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+async fn fetch_catalog_with_account_retry(
+    provider: &AntigravityProvider,
+) -> Result<CatalogSnapshot> {
+    let failed_account =
+        jcode_base::auth::imported_pool::active_or_next_eligible_account("google-antigravity")
+            .or_else(|| {
+                jcode_base::auth::imported_pool::active_or_next_eligible_account("antigravity")
+            });
+    match provider.fetch_available_models().await {
+        Ok(snapshot) => {
+            if let Some(account) = failed_account {
+                let _ = jcode_base::auth::imported_pool::record_success(
+                    &account.provider,
+                    &account.account_id,
+                );
+            }
+            Ok(snapshot)
+        }
+        Err(error)
+            if failed_account.is_some()
+                && jcode_base::auth::imported_pool::is_rotatable_error(&format!("{error:#}")) =>
+        {
+            let failed_account = failed_account.expect("guarded by is_some");
+            let next = jcode_base::auth::imported_pool::rotate_to_next_account(
+                &failed_account.provider,
+                &failed_account.account_id,
+                &format!("{error:#}"),
+            )?;
+            let Some(next) = next else {
+                return Err(error);
+            };
+            provider.invalidate_credentials().await;
+            let retry = provider.fetch_available_models().await;
+            match &retry {
+                Ok(_) => {
+                    let _ = jcode_base::auth::imported_pool::record_success(
+                        &next.provider,
+                        &next.account_id,
+                    );
+                }
+                Err(retry_error)
+                    if jcode_base::auth::imported_pool::is_rotatable_error(&format!(
+                        "{retry_error:#}"
+                    )) =>
+                {
+                    let _ = jcode_base::auth::imported_pool::record_failure(
+                        &next.provider,
+                        &next.account_id,
+                        &format!("{retry_error:#}"),
+                    );
+                }
+                Err(_) => {}
+            }
+            retry
+        }
+        Err(error) => Err(error),
+    }
 }
 
 impl Default for AntigravityProvider {
@@ -490,7 +642,7 @@ impl Provider for AntigravityProvider {
             // and the model re-signs its new calls.
             let mut signature_policy = jcode_provider_gemini::SignaturePolicy::ReplayCarriedForward;
             let response = match provider
-                .generate_content(
+                .generate_content_with_account_retry(
                     &model,
                     &messages,
                     &tools,
@@ -854,7 +1006,7 @@ impl Provider for AntigravityProvider {
     }
 
     async fn prefetch_models(&self) -> Result<()> {
-        match self.fetch_available_models().await {
+        match fetch_catalog_with_account_retry(self).await {
             Ok(snapshot) => {
                 if !snapshot.models.is_empty() {
                     jcode_base::logging::info(&format!(
@@ -894,6 +1046,20 @@ impl Provider for AntigravityProvider {
         }
 
         Ok(())
+    }
+
+    async fn invalidate_credentials(&self) {
+        // The persisted catalog is intentionally warm across process starts,
+        // but an account switch must not expose the previous account's quota
+        // and availability while the replacement fetch is in flight.
+        self.fetched_catalog
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        *self
+            .backend_default_model
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
 
     fn supports_compaction(&self) -> bool {

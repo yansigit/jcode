@@ -224,7 +224,9 @@ pub(super) fn command_preview(command: &AccountPickerCommand) -> String {
             AccountProviderKind::Anthropic => format!("/account switch {}", label),
             AccountProviderKind::OpenAi => format!("/account openai switch {}", label),
         },
-        AccountPickerCommand::SwitchProvider { provider_id, label } => {
+        AccountPickerCommand::SwitchProvider {
+            provider_id, label, ..
+        } => {
             format!("/account {} switch {}", provider_id, label)
         }
         AccountPickerCommand::Login { provider, label } => match provider {

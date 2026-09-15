@@ -1077,6 +1077,7 @@ mod tests {
     fn provider_neutral_switch_preview_uses_provider_and_account_id() {
         let command = AccountPickerCommand::SwitchProvider {
             provider_id: "antigravity".to_string(),
+            source_provider: "google-antigravity".to_string(),
             label: "account-id-2".to_string(),
         };
 

@@ -1087,6 +1087,9 @@ impl Provider for GeminiProvider {
     async fn invalidate_credentials(&self) {
         let mut guard = self.state.lock().await;
         *guard = None;
+        if let Ok(mut models) = self.fetched_models.write() {
+            models.clear();
+        }
     }
 }
 

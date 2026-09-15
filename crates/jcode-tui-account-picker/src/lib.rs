@@ -27,6 +27,7 @@ pub enum AccountPickerCommand {
     },
     SwitchProvider {
         provider_id: String,
+        source_provider: String,
         label: String,
     },
     Login {

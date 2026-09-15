@@ -139,6 +139,11 @@ pub(crate) enum AccountCommand {
         provider_id: String,
         label: String,
     },
+    SwitchImported {
+        provider_id: String,
+        source_provider: String,
+        label: String,
+    },
     SwitchShorthand {
         label: String,
     },

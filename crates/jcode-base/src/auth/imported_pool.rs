@@ -356,6 +356,9 @@ pub fn rotate_to_next_account(
 }
 
 pub fn import_opencodex_accounts(value: &Value) -> Result<Vec<ImportedAccount>> {
+    let _guard = RUNTIME_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut accounts = Vec::new();
     let Some(root) = value.as_object() else {
         return Ok(accounts);
@@ -534,7 +537,7 @@ pub fn update_tokens(
 mod tests {
     use super::*;
     use serde_json::json;
-    use tempfile::{tempdir, TempDir};
+    use tempfile::{TempDir, tempdir};
 
     struct TestHome {
         _temp: TempDir,
@@ -652,12 +655,16 @@ mod tests {
         });
         import_opencodex_accounts(&refreshed_source).unwrap();
         let accounts = list_provider("cursor");
-        assert!(accounts
-            .iter()
-            .any(|account| account.account_id == "cursor-b" && account.active));
-        assert!(!accounts
-            .iter()
-            .any(|account| account.account_id == "cursor-a" && account.active));
+        assert!(
+            accounts
+                .iter()
+                .any(|account| account.account_id == "cursor-b" && account.active)
+        );
+        assert!(
+            !accounts
+                .iter()
+                .any(|account| account.account_id == "cursor-a" && account.active)
+        );
     }
 
     #[test]
@@ -709,9 +716,11 @@ mod tests {
                 .account_id,
             "cursor-b"
         );
-        assert!(list_provider("cursor")
-            .iter()
-            .any(|account| account.account_id == "cursor-b" && account.active));
+        assert!(
+            list_provider("cursor")
+                .iter()
+                .any(|account| account.account_id == "cursor-b" && account.active)
+        );
 
         let state_path = runtime_state_path().unwrap();
         let raw_state = std::fs::read_to_string(state_path).unwrap();
@@ -719,10 +728,12 @@ mod tests {
         assert!(!raw_state.contains("refresh-secret-a"));
 
         record_success("cursor", "cursor-a").unwrap();
-        assert!(runtime_state("cursor", "cursor-a")
-            .unwrap()
-            .cooldown_until_ms
-            .is_none());
+        assert!(
+            runtime_state("cursor", "cursor-a")
+                .unwrap()
+                .cooldown_until_ms
+                .is_none()
+        );
         set_active("cursor", "first").unwrap();
         assert_eq!(
             rotate_to_next_account("cursor", "cursor-a", "HTTP 429 rate limit")
@@ -731,8 +742,10 @@ mod tests {
                 .account_id,
             "cursor-b"
         );
-        assert!(list_provider("cursor")
-            .iter()
-            .any(|account| account.account_id == "cursor-b" && account.active));
+        assert!(
+            list_provider("cursor")
+                .iter()
+                .any(|account| account.account_id == "cursor-b" && account.active)
+        );
     }
 }

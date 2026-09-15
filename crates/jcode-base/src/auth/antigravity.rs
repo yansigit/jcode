@@ -124,6 +124,22 @@ pub fn tokens_path() -> Result<std::path::PathBuf> {
 }
 
 pub fn load_tokens() -> Result<AntigravityTokens> {
+    // Open-Codex is an auth source, not a provider. When an imported account is
+    // selected in jcode, it must win over a stale native Antigravity file or a
+    // successful account switch will not affect inference.
+    if let Some(account) =
+        crate::auth::imported_pool::active_or_next_eligible_account("google-antigravity")
+            .or_else(|| crate::auth::imported_pool::active_or_next_eligible_account("antigravity"))
+    {
+        return Ok(AntigravityTokens {
+            access_token: account.access_token,
+            refresh_token: account.refresh_token.unwrap_or_default(),
+            expires_at: account.expires_at.unwrap_or(i64::MAX),
+            email: None,
+            project_id: None,
+        });
+    }
+
     let path = tokens_path()?;
     if path.exists() {
         crate::storage::harden_secret_file_permissions(&path);
@@ -184,6 +200,10 @@ pub async fn refresh_tokens(tokens: &AntigravityTokens) -> Result<AntigravityTok
 }
 
 async fn refresh_tokens_uncoordinated(tokens: &AntigravityTokens) -> Result<AntigravityTokens> {
+    let imported_account = crate::auth::imported_pool::list_provider("google-antigravity")
+        .into_iter()
+        .chain(crate::auth::imported_pool::list_provider("antigravity"))
+        .find(|account| account.access_token == tokens.access_token);
     let result: Result<AntigravityTokens> = async {
         let token = crate::auth::google_oauth::refresh_access_token(
             "Antigravity",
@@ -209,7 +229,17 @@ async fn refresh_tokens_uncoordinated(tokens: &AntigravityTokens) -> Result<Anti
             refreshed.project_id = fetch_project_id(&refreshed.access_token).await.ok();
         }
 
-        save_tokens(&refreshed)?;
+        if let Some(account) = &imported_account {
+            crate::auth::imported_pool::update_tokens(
+                &account.provider,
+                &account.account_id,
+                &refreshed.access_token,
+                Some(&refreshed.refresh_token),
+                Some(refreshed.expires_at),
+            )?;
+        } else {
+            save_tokens(&refreshed)?;
+        }
         Ok(refreshed)
     }
     .await;

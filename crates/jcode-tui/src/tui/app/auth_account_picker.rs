@@ -6,6 +6,10 @@ impl App {
         use crate::tui::account_picker::{AccountPicker, AccountPickerCommand, AccountPickerItem};
 
         crate::telemetry::record_setup_step_once("account_center_opened");
+        // A trusted Open-Codex source can gain accounts after approval. Sync
+        // its managed pool before rendering rows so the picker and runtime
+        // credential resolver see the same account set.
+        crate::auth::external::refresh_trusted_opencodex_import();
 
         let status = crate::auth::AuthStatus::check_fast();
         let validation = crate::auth::validation::load_all();
@@ -136,6 +140,7 @@ impl App {
                         format!("{state} · Open-Codex import · id {}", account.account_id),
                         AccountPickerCommand::SwitchProvider {
                             provider_id: provider.id.to_string(),
+                            source_provider: source_provider.to_string(),
                             label: account.account_id,
                         },
                     ));

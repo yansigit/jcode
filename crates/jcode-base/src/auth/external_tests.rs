@@ -15,7 +15,7 @@ fn novita_api_key_import_requires_trust() {
     let prev = std::env::var_os("JCODE_HOME");
     crate::env::set_var("JCODE_HOME", dir.path());
 
-    let path = ExternalAuthSource::OpenCode.path().unwrap();
+    let path = crate::storage::user_home_path(".local/share/opencode/auth.json").unwrap();
     write_auth_file(
         &path,
         serde_json::json!({ "novita": { "type": "api", "key": "novita_test_secret" } }),
@@ -41,7 +41,7 @@ fn opencode_api_key_imports_from_trusted_file() {
     let prev = std::env::var_os("JCODE_HOME");
     crate::env::set_var("JCODE_HOME", dir.path());
 
-    let path = ExternalAuthSource::OpenCode.path().unwrap();
+    let path = crate::storage::user_home_path(".local/share/opencode/auth.json").unwrap();
     write_auth_file(
         &path,
         serde_json::json!({
@@ -154,13 +154,148 @@ fn load_copilot_oauth_token_from_pi_auth() {
 }
 
 #[test]
+fn imported_opencodex_account_switch_changes_antigravity_oauth_resolution() {
+    let _guard = crate::storage::lock_test_env();
+    let dir = TempDir::new().unwrap();
+    let prev = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", dir.path());
+
+    let path = crate::storage::user_home_path(".opencodex/auth.json").unwrap();
+    write_auth_file(
+        &path,
+        serde_json::json!({
+            "google-antigravity": {
+                "activeAccountId": "ag-a",
+                "accounts": [
+                    {"id": "ag-a", "alias": "personal", "credential": {
+                        "access": "ag-access-a", "refresh": "ag-refresh-a",
+                        "expires": chrono::Utc::now().timestamp_millis() + 60_000
+                    }},
+                    {"id": "ag-b", "alias": "work", "credential": {
+                        "access": "ag-access-b", "refresh": "ag-refresh-b",
+                        "expires": chrono::Utc::now().timestamp_millis() + 60_000
+                    }}
+                ]
+            }
+        }),
+    );
+
+    trust_external_auth_source(ExternalAuthSource::OpenCode).unwrap();
+    assert_eq!(
+        load_antigravity_oauth_tokens()
+            .expect("active imported account")
+            .access_token,
+        "ag-access-a"
+    );
+
+    crate::auth::imported_pool::set_active("google-antigravity", "ag-b").unwrap();
+    assert_eq!(
+        load_antigravity_oauth_tokens()
+            .expect("switched imported account")
+            .access_token,
+        "ag-access-b"
+    );
+
+    if let Some(prev) = prev {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[test]
+fn trusted_opencodex_refresh_imports_new_accounts_and_preserves_selection() {
+    let _guard = crate::storage::lock_test_env();
+    let dir = TempDir::new().unwrap();
+    let prev = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", dir.path());
+
+    let path = crate::storage::user_home_path(".opencodex/auth.json").unwrap();
+    write_auth_file(
+        &path,
+        serde_json::json!({
+            "google-antigravity": {
+                "activeAccountId": "ag-a",
+                "accounts": [
+                    {"id": "ag-a", "alias": "personal", "credential": {
+                        "access": "ag-access-a", "refresh": "ag-refresh-a"
+                    }},
+                    {"id": "ag-b", "alias": "work", "credential": {
+                        "access": "ag-access-b", "refresh": "ag-refresh-b"
+                    }}
+                ]
+            }
+        }),
+    );
+    trust_external_auth_source(ExternalAuthSource::OpenCode).unwrap();
+    crate::auth::imported_pool::set_active("google-antigravity", "ag-b").unwrap();
+
+    write_auth_file(
+        &path,
+        serde_json::json!({
+            "google-antigravity": {
+                "activeAccountId": "ag-a",
+                "accounts": [
+                    {"id": "ag-a", "alias": "personal", "credential": {
+                        "access": "ag-access-a-new", "refresh": "ag-refresh-a-new"
+                    }},
+                    {"id": "ag-b", "alias": "work", "credential": {
+                        "access": "ag-access-b-new", "refresh": "ag-refresh-b-new"
+                    }},
+                    {"id": "ag-c", "alias": "new", "credential": {
+                        "access": "ag-access-c", "refresh": "ag-refresh-c"
+                    }}
+                ]
+            }
+        }),
+    );
+
+    refresh_trusted_opencodex_import();
+    let accounts = crate::auth::imported_pool::list_provider("google-antigravity");
+    assert_eq!(accounts.len(), 3);
+    assert!(
+        accounts
+            .iter()
+            .any(|account| account.account_id == "ag-b" && account.active)
+    );
+    assert_eq!(
+        load_antigravity_oauth_tokens().unwrap().access_token,
+        "ag-access-b-new"
+    );
+
+    crate::auth::imported_pool::update_tokens(
+        "google-antigravity",
+        "ag-b",
+        "ag-access-b-refreshed",
+        Some("ag-refresh-b-refreshed"),
+        Some(9_999_999_999_999),
+    )
+    .unwrap();
+    refresh_trusted_opencodex_import();
+    assert_eq!(
+        crate::auth::imported_pool::list_provider("google-antigravity")
+            .into_iter()
+            .find(|account| account.account_id == "ag-b")
+            .unwrap()
+            .access_token,
+        "ag-access-b-refreshed"
+    );
+
+    if let Some(prev) = prev {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[test]
 fn unconsented_source_detects_supported_api_key_files() {
     let _guard = crate::storage::lock_test_env();
     let dir = TempDir::new().unwrap();
     let prev = std::env::var_os("JCODE_HOME");
     crate::env::set_var("JCODE_HOME", dir.path());
 
-    let path = ExternalAuthSource::OpenCode.path().unwrap();
+    let path = crate::storage::user_home_path(".local/share/opencode/auth.json").unwrap();
     write_auth_file(
         &path,
         serde_json::json!({
@@ -187,7 +322,7 @@ fn source_provider_labels_reports_supported_oauth_and_api_key_imports() {
     let prev = std::env::var_os("JCODE_HOME");
     crate::env::set_var("JCODE_HOME", dir.path());
 
-    let path = ExternalAuthSource::OpenCode.path().unwrap();
+    let path = crate::storage::user_home_path(".opencodex/auth.json").unwrap();
     write_auth_file(
         &path,
         serde_json::json!({
@@ -203,6 +338,12 @@ fn source_provider_labels_reports_supported_oauth_and_api_key_imports() {
                 "refresh": "refresh",
                 "expires": chrono::Utc::now().timestamp_millis() + 60_000
             },
+            "cursor": {
+                "type": "oauth",
+                "access": "cursor-access",
+                "refresh": "refresh",
+                "expires": chrono::Utc::now().timestamp_millis() + 60_000
+            },
             "openrouter": { "type": "api", "key": "sk-or-test" }
         }),
     );
@@ -210,6 +351,7 @@ fn source_provider_labels_reports_supported_oauth_and_api_key_imports() {
     let labels = source_provider_labels(ExternalAuthSource::OpenCode);
     assert!(labels.contains(&"OpenAI/Codex"));
     assert!(labels.contains(&"Claude"));
+    assert!(labels.contains(&"Cursor"));
     assert!(labels.contains(&"OpenRouter/API-key providers"));
 
     if let Some(prev) = prev {
