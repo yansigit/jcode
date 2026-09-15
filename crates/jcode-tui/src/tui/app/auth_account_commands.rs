@@ -401,6 +401,21 @@ pub(crate) fn execute_account_command_local(app: &mut App, command: AccountComma
         AccountCommand::Switch { provider_id, label } => match provider_id.as_str() {
             "claude" => app.switch_account(&label),
             "openai" => app.switch_openai_account(&label),
+            "cursor" | "antigravity" | "gemini" | "copilot" => {
+                let source = match provider_id.as_str() {
+                    "antigravity" => "google-antigravity",
+                    other => other,
+                };
+                match crate::auth::imported_pool::set_active(source, &label) {
+                    Ok(()) => {
+                        crate::auth::AuthStatus::invalidate_cache();
+                        app.set_status_notice(format!("Switched {provider_id} imported account"));
+                    }
+                    Err(error) => {
+                        app.push_display_message(DisplayMessage::error(error.to_string()))
+                    }
+                }
+            }
             _ => app.push_display_message(DisplayMessage::error(format!(
                 "Provider {} does not support account switching.",
                 provider_id

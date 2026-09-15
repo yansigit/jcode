@@ -275,6 +275,18 @@ pub fn load_anthropic_oauth_tokens() -> Option<ExternalOAuthTokens> {
 
 /// Load the active Cursor OAuth account imported from Open-Codex.
 pub fn load_cursor_oauth_tokens() -> Option<ExternalOAuthTokens> {
+    let imported = crate::auth::imported_pool::list_provider("cursor");
+    if let Some(account) = imported
+        .iter()
+        .find(|account| account.active)
+        .or_else(|| imported.first())
+    {
+        return Some(ExternalOAuthTokens {
+            access_token: account.access_token.clone(),
+            refresh_token: account.refresh_token.clone()?,
+            expires_at: account.expires_at.unwrap_or(i64::MAX),
+        });
+    }
     let source = ExternalAuthSource::OpenCode;
     if !source_allowed(source) {
         return None;

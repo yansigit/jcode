@@ -12,6 +12,8 @@ pub struct ImportedAccount {
     pub refresh_token: Option<String>,
     pub expires_at: Option<i64>,
     pub source: String,
+    #[serde(default)]
+    pub active: bool,
 }
 
 fn path() -> Result<PathBuf> {
@@ -58,6 +60,10 @@ pub fn import_opencodex_accounts(value: &Value) -> Result<Vec<ImportedAccount>> 
             } else {
                 account_id.to_string()
             };
+            let active = provider_object
+                .get("activeAccountId")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id == account_id);
             let label = object
                 .get("alias")
                 .and_then(Value::as_str)
@@ -78,6 +84,7 @@ pub fn import_opencodex_accounts(value: &Value) -> Result<Vec<ImportedAccount>> 
                     .map(ToOwned::to_owned),
                 expires_at: credential.get("expires").and_then(Value::as_i64),
                 source: "open-codex".to_string(),
+                active,
             });
         }
     }
@@ -98,6 +105,23 @@ pub fn list_provider(provider: &str) -> Vec<ImportedAccount> {
         .into_iter()
         .filter(|account| account.provider == provider)
         .collect()
+}
+
+pub fn set_active(provider: &str, label: &str) -> Result<()> {
+    let target = path()?;
+    let mut accounts: Vec<ImportedAccount> = crate::storage::read_json(&target)?;
+    let mut found = false;
+    for account in &mut accounts {
+        if account.provider == provider {
+            account.active = account.label == label || account.account_id == label;
+            found |= account.active;
+        }
+    }
+    if !found {
+        anyhow::bail!("No imported {provider} account named '{label}'")
+    }
+    crate::storage::write_json_secret(&target, &accounts)?;
+    Ok(())
 }
 
 #[cfg(test)]
