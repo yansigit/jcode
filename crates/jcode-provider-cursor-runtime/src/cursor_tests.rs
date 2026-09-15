@@ -127,6 +127,13 @@ fn runtime_cursor_api_key_reads_env() {
 }
 
 #[test]
+fn imported_accounts_override_local_api_key_for_catalog_refresh() {
+    assert!(prefer_cursor_oauth_catalog(true, Some("local-api-key")));
+    assert!(prefer_cursor_oauth_catalog(false, None));
+    assert!(!prefer_cursor_oauth_catalog(false, Some("local-api-key")));
+}
+
+#[test]
 fn imported_cursor_retry_only_rotates_for_account_failures() {
     let auth_error = anyhow::anyhow!("HTTP 401 unauthorized");
     let rate_limit_error = anyhow::anyhow!("HTTP 429 rate limit");

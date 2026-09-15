@@ -458,7 +458,9 @@ async fn fetch_cursor_catalog_once(
 ) -> Result<Vec<String>> {
     match fetch_ai_service_models(client, &tokens.access_token).await {
         Ok(models) if !models.is_empty() => Ok(models),
-        Err(error) if is_rotatable_imported_cursor_error(&error) => Err(error),
+        Err(error) if tokens.account_id.is_some() && is_rotatable_imported_cursor_error(&error) => {
+            Err(error)
+        }
         Ok(_) | Err(_) => match fetch_agent_models(client, &tokens.access_token).await {
             Ok(models) if !models.is_empty() => Ok(models),
             Ok(_) => {
@@ -528,6 +530,10 @@ async fn fetch_cursor_catalog_with_rotation(client: &reqwest::Client) -> Result<
 
 fn runtime_cursor_api_key() -> Option<String> {
     jcode_base::auth::cursor::load_api_key().ok()
+}
+
+fn prefer_cursor_oauth_catalog(has_imported_accounts: bool, api_key: Option<&str>) -> bool {
+    has_imported_accounts || api_key.is_none_or(|key| key.trim().is_empty())
 }
 
 #[derive(Clone, Default)]
@@ -802,16 +808,23 @@ impl Provider for CursorCliProvider {
     }
 
     async fn prefetch_models(&self) -> Result<()> {
-        // Prefer the API key endpoint for backwards compatibility. When no
-        // key is configured, use the same managed/IDE OAuth resolution as the
-        // native AgentService transport. This is read-only and failures retain
-        // the static and persisted fallback catalog.
-        let fetched = if let Some(api_key) = runtime_cursor_api_key() {
-            fetch_available_models(&self.client, CursorModelsAuth::ApiKey(&api_key)).await
-        } else {
+        // Imported accounts are authoritative over local Cursor API-key auth,
+        // matching turn execution. The API-key endpoint remains the fallback
+        // only when no imported pool exists. This is read-only and failures
+        // retain the static and persisted fallback catalog.
+        let api_key = runtime_cursor_api_key();
+        let has_imported_accounts =
+            !jcode_base::auth::imported_pool::list_provider(CURSOR_IMPORTED_PROVIDER).is_empty();
+        let fetched = if prefer_cursor_oauth_catalog(has_imported_accounts, api_key.as_deref()) {
             fetch_cursor_catalog_with_rotation(&self.client)
                 .await
                 .context("no Cursor API key or OAuth credentials")
+        } else {
+            fetch_available_models(
+                &self.client,
+                CursorModelsAuth::ApiKey(api_key.as_deref().expect("checked above")),
+            )
+            .await
         };
 
         match fetched {
