@@ -22,6 +22,7 @@ use jcode_provider_core::{
     shared_http_client,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::RwLock;
@@ -189,6 +190,21 @@ fn openai_account_scope_from_label(label: Option<String>) -> String {
 }
 
 fn current_openai_account_scope() -> String {
+    if let Some(identity) = auth::codex::active_account_catalog_identity() {
+        let digest = Sha256::digest(format!("openai::{identity}").as_bytes());
+        return format!("credential::{digest:x}");
+    }
+
+    // API-key-only sessions do not have an OpenAI OAuth account label. Keep
+    // their catalogs isolated by key fingerprint without persisting the key.
+    if let Some(api_key) =
+        crate::provider_catalog::load_api_key_from_env_or_config("OPENAI_API_KEY", "openai.env")
+    {
+        let digest = Sha256::digest(format!("openai-api-key::{api_key}").as_bytes());
+        return format!("credential::{digest:x}");
+    }
+
+    // Test fixtures and unauthenticated startup retain the old label fallback.
     openai_account_scope_from_label(auth::codex::active_account_label())
 }
 
@@ -315,11 +331,60 @@ fn live_catalog_model_ids(service: &ModelCatalogService, scope: &str) -> Option<
 }
 
 fn load_openai_catalog_from_disk(scope: &str) -> Option<Vec<String>> {
-    hydrate_catalog_cache_from_disk(
+    if let Some(models) = hydrate_catalog_cache_from_disk(
         OPENAI_MODEL_CATALOG_CACHE_FILE,
         scope,
         &OPENAI_MODEL_CATALOG_SERVICE,
-    )
+    ) {
+        return Some(models);
+    }
+
+    // Migrate an existing pre-pooling cache when the active label maps to a
+    // known credential. Only labels proven to use the same account are read,
+    // and the merged snapshot is written under the hashed credential scope.
+    let legacy_scopes = auth::codex::active_account_catalog_legacy_scopes();
+    if legacy_scopes.is_empty() {
+        return None;
+    }
+    let store = load_persisted_model_catalog_store(OPENAI_MODEL_CATALOG_CACHE_FILE)?;
+    let mut models = HashSet::new();
+    let mut context_limits = HashMap::new();
+    let mut reasoning_efforts = HashMap::new();
+    let mut observed_at = UNIX_EPOCH;
+
+    for legacy_scope in legacy_scopes {
+        let Some(persisted) = store.scopes.get(&legacy_scope) else {
+            continue;
+        };
+        models.extend(
+            persisted
+                .models
+                .iter()
+                .map(|model| normalize_model_id(model))
+                .filter(|model| !model.is_empty()),
+        );
+        context_limits.extend(persisted.context_limits.clone());
+        reasoning_efforts.extend(persisted.reasoning_efforts.clone());
+        observed_at = observed_at.max(system_time_from_unix_secs(persisted.observed_at_unix_secs));
+    }
+
+    if models.is_empty() {
+        return None;
+    }
+
+    let mut model_ids: Vec<String> = models.iter().cloned().collect();
+    model_ids.sort();
+    persist_scoped_model_catalog(
+        OPENAI_MODEL_CATALOG_CACHE_FILE,
+        scope,
+        &model_ids,
+        &context_limits,
+        &reasoning_efforts,
+        observed_at,
+    );
+    OPENAI_MODEL_CATALOG_SERVICE.hydrate_scope_models_from_snapshot(scope, models, observed_at);
+    populate_context_limits(context_limits);
+    Some(model_ids_with_context_aliases(model_ids))
 }
 
 fn load_anthropic_catalog_from_disk(scope: &str) -> Option<Vec<String>> {
@@ -626,7 +691,6 @@ fn populate_anthropic_models_for_scope(scope: &str, slugs: Vec<String>) {
     crate::bus::Bus::global().publish_models_updated();
 }
 
-#[cfg(test)]
 pub(crate) fn merge_openai_model_ids(dynamic_models: Vec<String>) -> Vec<String> {
     let mut models = openai_static_model_ids();
     let mut seen: HashSet<String> = models
@@ -698,7 +762,12 @@ pub fn openai_platform_api_key_configured() -> bool {
 }
 
 pub fn known_openai_model_ids() -> Vec<String> {
-    let mut models = cached_openai_model_ids().unwrap_or_else(openai_static_model_ids);
+    // The static catalog is the stable product capability baseline. The live
+    // provider catalog may be incomplete during rollouts or pool transitions,
+    // so discovered models extend rather than replace the baseline.
+    let mut models = cached_openai_model_ids()
+        .map(merge_openai_model_ids)
+        .unwrap_or_else(openai_static_model_ids);
     if !models.iter().any(|model| model == CHATGPT_WEB_MODEL) {
         models.push(CHATGPT_WEB_MODEL.to_string());
     }
@@ -1052,6 +1121,16 @@ pub fn model_availability_for_account(model: &str) -> AccountModelAvailability {
             source: "account-snapshot",
             observed_at: account_models_observed_at(),
         },
+        Some(false) if is_static_openai_model(model) => AccountModelAvailability {
+            // A missing static model is not a reliable negative entitlement
+            // signal. The catalog endpoint can be incomplete during account
+            // and pool transitions. Let an actual request rejection establish
+            // a runtime unavailability marker instead.
+            state: AccountModelAvailabilityState::Unknown,
+            reason: Some("not confirmed by the account snapshot".to_string()),
+            source: "static-catalog",
+            observed_at: account_models_observed_at(),
+        },
         Some(false) => AccountModelAvailability {
             state: AccountModelAvailabilityState::Unavailable,
             reason: Some("not available for your account".to_string()),
@@ -1065,6 +1144,13 @@ pub fn model_availability_for_account(model: &str) -> AccountModelAvailability {
             observed_at: account_models_observed_at(),
         },
     }
+}
+
+fn is_static_openai_model(model: &str) -> bool {
+    let normalized = normalize_model_id(model);
+    openai_static_model_ids()
+        .iter()
+        .any(|known| normalize_model_id(known) == normalized)
 }
 
 /// Preferred model order for fallback selection.
@@ -1091,8 +1177,7 @@ pub fn get_best_available_openai_model() -> Option<String> {
     if !account_model_cache_is_fresh() {
         return None;
     }
-    let scope = current_openai_account_scope();
-    let models = OPENAI_MODEL_CATALOG_SERVICE.model_ids(&scope)?;
+    let models = known_openai_model_ids();
 
     for preferred in OPENAI_MODEL_PREFERENCE {
         if models.iter().any(|model| model == *preferred)
