@@ -145,6 +145,7 @@ fn test_disconnected_key_handler_runs_effort_locally() {
 fn test_disconnected_key_handler_runs_model_picker_locally() {
     let mut app = create_test_app();
     configure_test_remote_models(&mut app);
+    app.remote_provider_name = Some("OpenAI".to_string());
     // Reasoning effort is independent from model selection. The current model
     // row remains selected regardless of the session effort.
     app.remote_reasoning_effort = Some("high".to_string());
