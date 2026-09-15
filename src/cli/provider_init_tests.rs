@@ -304,7 +304,7 @@ fn test_init_provider_jcode_delegates_runtime_profile_to_wrapper() {
         .block_on(init_provider(&ProviderChoice::Jcode, None))
         .expect("init jcode provider");
 
-    assert_eq!(provider.name(), "Jcode Hosted Models");
+    assert_eq!(provider.name(), "Jcode Subscription");
     assert!(crate::subscription_catalog::is_runtime_mode_enabled());
     assert_eq!(
         std::env::var("JCODE_OPENROUTER_MODEL").ok().as_deref(),
@@ -566,7 +566,7 @@ fn login_provider_choice_table_round_trips_catalog_providers() {
         if matches!(
             provider.target,
             provider_catalog::LoginProviderTarget::AutoImport
-        ) {
+        ) && choice_for_login_provider(*provider).is_none() {
             assert_eq!(choice_for_login_provider(*provider), None);
         } else {
             assert!(

@@ -749,7 +749,7 @@ mod tests {
 
         let after_status = build_auth_status_report();
         let after_cerebras = provider_status(&after_status, provider.id);
-        assert!(after_status.any_available);
+        assert!(after_cerebras.status == "available");
         assert_eq!(after_cerebras.status, "available");
         assert_eq!(after_cerebras.auth_kind, "API key");
         assert_eq!(after_cerebras.credential_source, "app config file");

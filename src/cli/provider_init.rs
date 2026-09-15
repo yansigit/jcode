@@ -40,6 +40,7 @@ pub enum ProviderChoice {
     )]
     OpenaiApi,
     Openrouter,
+    Orcarouter,
     #[value(alias = "commandcode")]
     CommandCode,
     #[value(alias = "aws-bedrock", alias = "aws_bedrock")]
@@ -156,6 +157,7 @@ impl ProviderChoice {
             Self::Openai => "openai",
             Self::OpenaiApi => "openai-api",
             Self::Openrouter => "openrouter",
+            Self::Orcarouter => "orcarouter",
             Self::CommandCode => "command-code",
             Self::Bedrock => "bedrock",
             Self::Azure => "azure",
@@ -237,6 +239,10 @@ const PROVIDER_CHOICE_LOGIN_PROVIDERS: &[(ProviderChoice, LoginProviderDescripto
     (
         ProviderChoice::Openrouter,
         crate::provider_catalog::OPENROUTER_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Orcarouter,
+        crate::provider_catalog::ORCAROUTER_LOGIN_PROVIDER,
     ),
     (
         ProviderChoice::CommandCode,
@@ -1560,6 +1566,13 @@ async fn init_provider_with_options(
             ensure_external_api_key_auth_allowed_for_explicit_choice("OPENROUTER_API_KEY")?;
             init_notice("Using OpenRouter as the initial provider (use /model to switch)");
             select_initial_model_provider("openrouter");
+            Arc::new(provider::MultiProvider::new_fast())
+        }
+        ProviderChoice::Orcarouter => {
+            disable_subscription_runtime_mode();
+            ensure_external_api_key_auth_allowed_for_explicit_choice("ORCAROUTER_API_KEY")?;
+            init_notice("Using OrcaRouter as the initial provider (use /model to switch)");
+            select_initial_model_provider("orcarouter");
             Arc::new(provider::MultiProvider::new_fast())
         }
         ProviderChoice::CommandCode => {
