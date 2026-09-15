@@ -16,8 +16,8 @@ use crate::{
 };
 
 use super::{
-    account, acp, commands, debug, hot_exec, login, output, provider_init, selfdev, terminal,
-    tui_launch,
+    account, acp, commands, debug, hot_exec, login, output, provider_init, selfdev, storage,
+    terminal, tui_launch,
 };
 use provider_init::ProviderChoice;
 
@@ -396,6 +396,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             commands::run_usage_command(json).await?;
         }
         Some(Command::Telemetry(action)) => super::telemetry::run(action)?,
+        Some(Command::Storage { action }) => storage::run(action)?,
         Some(Command::SelfDev { build }) => {
             selfdev::run_self_dev(build, args.resume).await?;
         }

@@ -297,6 +297,12 @@ pub(crate) enum Command {
     #[command(subcommand)]
     Telemetry(TelemetryCommand),
 
+    /// Inspect and safely clean managed jcode storage
+    Storage {
+        #[command(subcommand)]
+        action: StorageCommand,
+    },
+
     /// Self-development mode: run as a canary session on the shared server
     #[command(alias = "selfdev")]
     SelfDev {
@@ -595,6 +601,31 @@ pub(crate) enum Command {
         /// Starts the shared daemon if needed; does not create an API socket.
         #[arg(long, conflicts_with = "api_socket")]
         stdio: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum StorageCommand {
+    /// Report managed storage and the current project's Cargo target size
+    Status {
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Plan or apply cleanup of stale scratch data and unreferenced builds
+    Cleanup {
+        /// Delete the reported candidates. Without this flag, cleanup is a dry run.
+        #[arg(long)]
+        apply: bool,
+        /// Preserve this many newest unreferenced build versions, in addition to all active channels
+        #[arg(long, default_value_t = 8)]
+        keep_builds: usize,
+        /// Only consider scratch entries older than this many hours
+        #[arg(long, default_value_t = 24)]
+        scratch_min_age_hours: u64,
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
     },
 }
 

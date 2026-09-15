@@ -810,6 +810,38 @@ fn usage_subcommand_parses() {
 }
 
 #[test]
+fn storage_cleanup_is_dry_run_by_default_and_parses_retention_options() {
+    let args = Args::try_parse_from([
+        "jcode",
+        "storage",
+        "cleanup",
+        "--keep-builds",
+        "5",
+        "--scratch-min-age-hours",
+        "72",
+        "--json",
+    ])
+    .unwrap();
+    match args.command {
+        Some(Command::Storage {
+            action:
+                StorageCommand::Cleanup {
+                    apply,
+                    keep_builds,
+                    scratch_min_age_hours,
+                    json,
+                },
+        }) => {
+            assert!(!apply);
+            assert_eq!(keep_builds, 5);
+            assert_eq!(scratch_min_age_hours, 72);
+            assert!(json);
+        }
+        other => panic!("unexpected command: {:?}", other),
+    }
+}
+
+#[test]
 fn auth_status_subcommand_parses() {
     let args = Args::try_parse_from(["jcode", "auth", "status", "--json"]).unwrap();
     match args.command {
