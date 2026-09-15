@@ -39,12 +39,14 @@ pub fn import_opencodex_accounts(value: &Value) -> Result<Vec<ImportedAccount>> 
             let Some(credential) = object.get("credential").and_then(Value::as_object) else {
                 continue;
             };
-            let access = credential
+            let Some(access) = credential
                 .get("access")
                 .and_then(Value::as_str)
                 .map(str::trim)
-                .filter(|v| !v.is_empty());
-            let Some(access) = access else { continue };
+                .filter(|v| !v.is_empty())
+            else {
+                continue;
+            };
             let account_id = object
                 .get("id")
                 .and_then(Value::as_str)
@@ -96,4 +98,39 @@ pub fn list_provider(provider: &str) -> Vec<ImportedAccount> {
         .into_iter()
         .filter(|account| account.provider == provider)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn imports_every_nested_provider_account() {
+        let value = json!({
+            "cursor": {"activeAccountId": "cursor-b", "accounts": [
+                {"id": "cursor-a", "alias": "first", "credential": {"access": "a", "refresh": "ra", "expires": 1}},
+                {"id": "cursor-b", "alias": "second", "credential": {"access": "b", "refresh": "rb", "expires": 2}}
+            ]},
+            "google-antigravity": {"accounts": [
+                {"id": "ag-a", "credential": {"access": "c", "refresh": "rc", "expires": 3}}
+            ]}
+        });
+        let accounts = import_opencodex_accounts(&value).unwrap();
+        assert_eq!(accounts.len(), 3);
+        assert_eq!(accounts[1].account_id, "cursor-b");
+        assert_eq!(accounts[1].label, "second");
+        assert_eq!(accounts[2].provider, "google-antigravity");
+    }
+
+    #[test]
+    fn skips_accounts_without_access_tokens() {
+        let value = json!({"cursor": {"accounts": [
+            {"id": "missing", "credential": {"refresh": "r"}},
+            {"id": "valid", "credential": {"access": "a"}}
+        ]}});
+        let accounts = import_opencodex_accounts(&value).unwrap();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].account_id, "valid");
+    }
 }

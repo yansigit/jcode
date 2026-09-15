@@ -409,6 +409,17 @@ fn load_auth_map(source: ExternalAuthSource) -> Result<HashMap<String, Value>> {
         .with_context(|| format!("Failed to read {}", path.display()))?;
     let value: Value = serde_json::from_str(&raw)
         .with_context(|| format!("Failed to parse {}", path.display()))?;
+    if matches!(source, ExternalAuthSource::OpenCode) {
+        // Older imports stored only the raw snapshot. Backfill the managed
+        // provider pool lazily so upgrading does not require re-approving the
+        // already trusted Open-Codex source.
+        let pool_path = crate::storage::app_config_dir()?
+            .join("imported_auth")
+            .join("account_pools.json");
+        if !pool_path.is_file() {
+            crate::auth::imported_pool::import_opencodex_accounts(&value)?;
+        }
+    }
     match source {
         ExternalAuthSource::OpenCode => Ok(flatten_opencodex_auth_store(&value)),
         ExternalAuthSource::Pi => Ok(value
