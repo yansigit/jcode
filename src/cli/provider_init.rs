@@ -455,6 +455,9 @@ pub fn login_provider_for_choice(choice: &ProviderChoice) -> Option<LoginProvide
 
 #[allow(deprecated)]
 pub fn choice_for_login_provider(provider: LoginProviderDescriptor) -> Option<ProviderChoice> {
+    if provider.id == "orcarouter" {
+        return Some(ProviderChoice::Orcarouter);
+    }
     PROVIDER_CHOICE_LOGIN_PROVIDERS
         .iter()
         .find(|(choice, candidate)| {

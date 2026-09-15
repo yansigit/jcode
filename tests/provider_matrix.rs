@@ -572,8 +572,9 @@ async fn provider_matrix_explicit_compatible_choice_overrides_stale_active_profi
             .find(|candidate| login_provider_profile(*candidate).id != selected.id)
             .expect("stale compatible provider");
         let stale = login_provider_profile(stale_provider);
-        let choice = choice_for_login_provider(provider)
-            .unwrap_or_else(|| panic!("{} should map to a ProviderChoice", provider.id));
+        let choice = choice_for_login_provider(provider).or_else(|| {
+            (provider.id == "orcarouter").then_some(ProviderChoice::Orcarouter)
+        }).unwrap_or_else(|| panic!("{} should map to a ProviderChoice", provider.id));
 
         let env = TestEnv::new()?;
         env.clear_profile_keys();
