@@ -44,7 +44,14 @@ impl ExternalAuthSource {
 
     pub fn path(self) -> Result<PathBuf> {
         match self {
-            Self::OpenCode => crate::storage::user_home_path(".local/share/opencode/auth.json"),
+            Self::OpenCode => {
+                let opencodex = crate::storage::user_home_path(".opencodex/auth.json")?;
+                if opencodex.is_file() {
+                    Ok(opencodex)
+                } else {
+                    crate::storage::user_home_path(".local/share/opencode/auth.json")
+                }
+            }
             Self::Pi => crate::storage::user_home_path(".pi/agent/auth.json"),
             Self::OpenClaw => openclaw_auth_path(),
             Self::Hermes => crate::storage::user_home_path(".hermes/auth.json"),

@@ -815,7 +815,9 @@ impl App {
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let provider_clone = Arc::clone(&provider);
             handle.spawn(async move {
-                let _ = provider_clone.prefetch_models().await;
+                if provider_clone.prefetch_models().await.is_ok() {
+                    crate::bus::Bus::global().publish_models_updated();
+                }
             });
         }
 
