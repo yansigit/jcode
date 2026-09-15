@@ -489,15 +489,83 @@ pub fn set_active(provider: &str, label: &str) -> Result<()> {
     set_active_unlocked(provider, label)
 }
 
+/// Persist refreshed credentials for one imported account without changing
+/// its active selection or runtime health state. `None` keeps the previous
+/// refresh token or expiry, which is important for OAuth responses that omit a
+/// refresh token on subsequent refreshes.
+pub fn update_tokens(
+    provider: &str,
+    account_id: &str,
+    access_token: &str,
+    refresh_token: Option<&str>,
+    expires_at: Option<i64>,
+) -> Result<()> {
+    let access_token = access_token.trim();
+    if access_token.is_empty() {
+        anyhow::bail!("Imported {provider} account {account_id} returned an empty access token")
+    }
+
+    let _guard = RUNTIME_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let target = path()?;
+    let mut accounts: Vec<ImportedAccount> = crate::storage::read_json(&target)?;
+    let Some(account) = accounts
+        .iter_mut()
+        .find(|account| account.provider == provider && account.account_id == account_id)
+    else {
+        anyhow::bail!("No imported {provider} account with id '{account_id}'")
+    };
+
+    account.access_token = access_token.to_string();
+    if let Some(refresh_token) = refresh_token
+        .map(str::trim)
+        .filter(|refresh_token| !refresh_token.is_empty())
+    {
+        account.refresh_token = Some(refresh_token.to_string());
+    }
+    if let Some(expires_at) = expires_at {
+        account.expires_at = Some(expires_at);
+    }
+    crate::storage::write_json_secret(&target, &accounts)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-    use tempfile::tempdir;
+    use tempfile::{tempdir, TempDir};
+
+    struct TestHome {
+        _temp: TempDir,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl TestHome {
+        fn new() -> Self {
+            let temp = tempdir().unwrap();
+            let previous = std::env::var_os("JCODE_HOME");
+            crate::env::set_var("JCODE_HOME", temp.path());
+            Self {
+                _temp: temp,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for TestHome {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => crate::env::set_var("JCODE_HOME", value),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+        }
+    }
 
     #[test]
     fn imports_every_nested_provider_account() {
         let _env_lock = crate::storage::lock_test_env();
+        let _home = TestHome::new();
         let value = json!({
             "cursor": {"activeAccountId": "cursor-b", "accounts": [
                 {"id": "cursor-a", "alias": "first", "credential": {"access": "a", "refresh": "ra", "expires": 1}},
@@ -517,6 +585,7 @@ mod tests {
     #[test]
     fn skips_accounts_without_access_tokens() {
         let _env_lock = crate::storage::lock_test_env();
+        let _home = TestHome::new();
         let value = json!({"cursor": {"accounts": [
             {"id": "missing", "credential": {"refresh": "r"}},
             {"id": "valid", "credential": {"access": "a"}}
@@ -563,11 +632,38 @@ mod tests {
     }
 
     #[test]
+    fn refresh_preserves_the_locally_selected_imported_account() {
+        let _env_lock = crate::storage::lock_test_env();
+        let _home = TestHome::new();
+        let initial = json!({
+            "cursor": {"activeAccountId": "cursor-a", "accounts": [
+                {"id": "cursor-a", "credential": {"access": "a", "refresh": "ra"}},
+                {"id": "cursor-b", "credential": {"access": "b", "refresh": "rb"}}
+            ]}
+        });
+        import_opencodex_accounts(&initial).unwrap();
+        set_active("cursor", "cursor-b").unwrap();
+
+        let refreshed_source = json!({
+            "cursor": {"activeAccountId": "cursor-a", "accounts": [
+                {"id": "cursor-a", "credential": {"access": "a2", "refresh": "ra2"}},
+                {"id": "cursor-b", "credential": {"access": "b2", "refresh": "rb2"}}
+            ]}
+        });
+        import_opencodex_accounts(&refreshed_source).unwrap();
+        let accounts = list_provider("cursor");
+        assert!(accounts
+            .iter()
+            .any(|account| account.account_id == "cursor-b" && account.active));
+        assert!(!accounts
+            .iter()
+            .any(|account| account.account_id == "cursor-a" && account.active));
+    }
+
+    #[test]
     fn persists_failure_state_without_credentials_and_rotates_eligible_account() {
         let _env_lock = crate::storage::lock_test_env();
-        let temp = tempdir().unwrap();
-        let previous_home = std::env::var_os("JCODE_HOME");
-        crate::env::set_var("JCODE_HOME", temp.path());
+        let _home = TestHome::new();
 
         let value = json!({
             "cursor": {"activeAccountId": "cursor-a", "accounts": [
@@ -585,6 +681,22 @@ mod tests {
         .unwrap();
         assert_eq!(state.last_failure_kind.as_deref(), Some("authentication"));
         assert!(state.cooldown_until_ms.unwrap() > now_ms());
+        update_tokens(
+            "cursor",
+            "cursor-a",
+            "access-secret-a-refreshed",
+            None,
+            Some(now_ms() + 3_600_000),
+        )
+        .unwrap();
+        let refreshed = list_provider("cursor")
+            .into_iter()
+            .find(|account| account.account_id == "cursor-a")
+            .unwrap();
+        assert_eq!(refreshed.access_token, "access-secret-a-refreshed");
+        assert_eq!(refreshed.refresh_token.as_deref(), Some("refresh-secret-a"));
+        assert!(refreshed.active);
+        assert_eq!(runtime_state("cursor", "cursor-a").unwrap(), state);
         assert_eq!(
             next_eligible_account("cursor", Some("cursor-a"))
                 .unwrap()
@@ -622,10 +734,5 @@ mod tests {
         assert!(list_provider("cursor")
             .iter()
             .any(|account| account.account_id == "cursor-b" && account.active));
-
-        match previous_home {
-            Some(value) => crate::env::set_var("JCODE_HOME", value),
-            None => crate::env::remove_var("JCODE_HOME"),
-        }
     }
 }
