@@ -727,12 +727,12 @@ fn ensure_external_api_key_auth_allowed_for_explicit_choice(env_key: &str) -> Re
     if !can_prompt_for_external_auth() {
         anyhow::bail!(external_auth_blocked_message(
             &provider_name,
-            source.display_name(),
+            &source.display_name(),
             &path,
             &login_hint,
         ));
     }
-    if prompt_to_trust_external_auth(&provider_name, source.display_name(), &path)? {
+    if prompt_to_trust_external_auth(&provider_name, &source.display_name(), &path)? {
         auth::external::trust_external_auth_source(source)?;
         return Ok(());
     }
@@ -803,13 +803,13 @@ fn maybe_enable_external_api_key_auth_for_auto(has_other_provider: bool) -> Resu
         if !can_prompt_for_external_auth() {
             crate::logging::warn(&external_auth_blocked_message(
                 &provider_name,
-                source.display_name(),
+                &source.display_name(),
                 &path,
                 &login_hint,
             ));
             return Ok(false);
         }
-        if prompt_to_trust_external_auth(&provider_name, source.display_name(), &path)? {
+        if prompt_to_trust_external_auth(&provider_name, &source.display_name(), &path)? {
             auth::external::trust_external_auth_source(source)?;
             return Ok(provider::openrouter::has_credentials());
         }
@@ -834,7 +834,7 @@ fn maybe_prompt_for_generic_oauth_source(
         if auto {
             crate::logging::warn(&external_auth_blocked_message(
                 provider_name,
-                source.display_name(),
+                &source.display_name(),
                 &path,
                 login_hint,
             ));
@@ -842,12 +842,12 @@ fn maybe_prompt_for_generic_oauth_source(
         }
         anyhow::bail!(external_auth_blocked_message(
             provider_name,
-            source.display_name(),
+            &source.display_name(),
             &path,
             login_hint,
         ));
     }
-    if prompt_to_trust_external_auth(provider_name, source.display_name(), &path)? {
+    if prompt_to_trust_external_auth(provider_name, &source.display_name(), &path)? {
         auth::external::trust_external_auth_source(source)?;
         return Ok(if auto { validation() } else { true });
     }
@@ -962,12 +962,12 @@ fn ensure_claude_auth_allowed_for_explicit_choice() -> Result<()> {
     if !can_prompt_for_external_auth() {
         anyhow::bail!(external_auth_blocked_message(
             "Claude",
-            source.display_name(),
+            &source.display_name(),
             &path,
             "jcode login --provider claude"
         ));
     }
-    if prompt_to_trust_external_auth("Claude", source.display_name(), &path)? {
+    if prompt_to_trust_external_auth("Claude", &source.display_name(), &path)? {
         auth::claude::trust_external_auth_source(source)?;
         return Ok(());
     }
@@ -1004,13 +1004,13 @@ fn maybe_enable_claude_auth_for_auto(has_other_provider: bool) -> Result<bool> {
     if !can_prompt_for_external_auth() {
         crate::logging::warn(&external_auth_blocked_message(
             "Claude",
-            source.display_name(),
+            &source.display_name(),
             &path,
             "jcode login --provider claude",
         ));
         return Ok(false);
     }
-    if prompt_to_trust_external_auth("Claude", source.display_name(), &path)? {
+    if prompt_to_trust_external_auth("Claude", &source.display_name(), &path)? {
         auth::claude::trust_external_auth_source(source)?;
         return Ok(auth::claude::load_credentials().is_ok());
     }
@@ -1133,12 +1133,12 @@ fn ensure_copilot_auth_allowed_for_explicit_choice() -> Result<()> {
     if !can_prompt_for_external_auth() {
         anyhow::bail!(external_auth_blocked_message(
             "GitHub Copilot",
-            source.display_name(),
+            &source.display_name(),
             &path,
             "jcode login --provider copilot"
         ));
     }
-    if prompt_to_trust_external_auth("GitHub Copilot", source.display_name(), &path)? {
+    if prompt_to_trust_external_auth("GitHub Copilot", &source.display_name(), &path)? {
         auth::copilot::trust_external_auth_source(source)?;
         return Ok(());
     }
@@ -1161,13 +1161,13 @@ fn maybe_enable_copilot_auth_for_auto(has_other_provider: bool) -> Result<bool> 
     if !can_prompt_for_external_auth() {
         crate::logging::warn(&external_auth_blocked_message(
             "GitHub Copilot",
-            source.display_name(),
+            &source.display_name(),
             &path,
             "jcode login --provider copilot",
         ));
         return Ok(false);
     }
-    if prompt_to_trust_external_auth("GitHub Copilot", source.display_name(), &path)? {
+    if prompt_to_trust_external_auth("GitHub Copilot", &source.display_name(), &path)? {
         auth::copilot::trust_external_auth_source(source)?;
         return Ok(auth::copilot::load_github_token().is_ok());
     }
@@ -1185,12 +1185,12 @@ fn ensure_cursor_auth_allowed_for_explicit_choice() -> Result<()> {
     if !can_prompt_for_external_auth() {
         anyhow::bail!(external_auth_blocked_message(
             "Cursor",
-            source.display_name(),
+            &source.display_name(),
             &path,
             "jcode login --provider cursor"
         ));
     }
-    if prompt_to_trust_external_auth("Cursor", source.display_name(), &path)? {
+    if prompt_to_trust_external_auth("Cursor", &source.display_name(), &path)? {
         auth::cursor::trust_external_auth_source(source)?;
         return Ok(());
     }
@@ -1213,13 +1213,13 @@ fn maybe_enable_cursor_auth_for_auto(has_other_provider: bool) -> Result<bool> {
     if !can_prompt_for_external_auth() {
         crate::logging::warn(&external_auth_blocked_message(
             "Cursor",
-            source.display_name(),
+            &source.display_name(),
             &path,
             "jcode login --provider cursor",
         ));
         return Ok(false);
     }
-    if prompt_to_trust_external_auth("Cursor", source.display_name(), &path)? {
+    if prompt_to_trust_external_auth("Cursor", &source.display_name(), &path)? {
         auth::cursor::trust_external_auth_source(source)?;
         return Ok(auth::cursor::has_cursor_native_auth());
     }
