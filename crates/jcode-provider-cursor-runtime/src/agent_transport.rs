@@ -1234,6 +1234,22 @@ mod tests {
     }
 
     #[test]
+    fn available_models_decoder_reads_complete_ai_service_catalog_shape() {
+        let expected = [
+            "cursor-grok-4.6-high",
+            "gemini-3.8-flash-high",
+            "muse-spark-1.3-high",
+            "kimi-k3-max",
+        ];
+        let response = expected
+            .iter()
+            .flat_map(|model| field_ld(2, &field_str(1, model)))
+            .collect::<Vec<_>>();
+
+        assert_eq!(crate::decode_available_models(&response).unwrap(), expected);
+    }
+
+    #[test]
     fn run_request_uses_current_model_metadata_shape() {
         let frame = build_run_frames("hello", "composer-2.5", "/tmp", &[], "request-id")
             .into_iter()

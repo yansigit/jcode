@@ -27,6 +27,8 @@ mod agent_transport;
 pub mod wire;
 
 const MODELS_API_URL: &str = "https://api.cursor.com/v0/models";
+const AVAILABLE_MODELS_API_URL: &str =
+    "https://api2.cursor.sh/aiserver.v1.AiService/AvailableModels";
 const MAX_AGENT_MODELS_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_PROMPT_CHARS: usize = 120_000;
 
@@ -123,7 +125,7 @@ struct CursorModelsResponse {
 /// `ModelDetails` messages in field 1, and `ModelDetails.model_id` is field 1.
 /// Keep this parser deliberately small and forward-compatible: unknown fields
 /// are skipped, while malformed/truncated input is rejected.
-fn decode_agent_models(mut payload: &[u8]) -> Result<Vec<String>> {
+fn decode_model_details(mut payload: &[u8], repeated_field: u64) -> Result<Vec<String>> {
     if payload.len() >= 5 && (payload[0] == 0 || payload[0] == 1) {
         let framed_len =
             u32::from_be_bytes([payload[1], payload[2], payload[3], payload[4]]) as usize;
@@ -134,7 +136,7 @@ fn decode_agent_models(mut payload: &[u8]) -> Result<Vec<String>> {
 
     let mut models = Vec::new();
     for field in protobuf_fields(payload)? {
-        if field.number != 1 || field.wire_type != 2 {
+        if field.number != repeated_field || field.wire_type != 2 {
             continue;
         }
         let model_id = protobuf_fields(field.data)?
@@ -150,6 +152,17 @@ fn decode_agent_models(mut payload: &[u8]) -> Result<Vec<String>> {
         }
     }
     Ok(models)
+}
+
+fn decode_agent_models(payload: &[u8]) -> Result<Vec<String>> {
+    decode_model_details(payload, 1)
+}
+
+/// Decode Cursor's current `AiService/AvailableModels` response. The official
+/// `cursor-agent --list-models` client receives repeated `ModelDetails` in
+/// top-level field 2, with the selectable model id in nested field 1.
+fn decode_available_models(payload: &[u8]) -> Result<Vec<String>> {
+    decode_model_details(payload, 2)
 }
 
 #[derive(Debug)]
@@ -389,20 +402,74 @@ async fn fetch_agent_models(client: &reqwest::Client, access_token: &str) -> Res
     decode_agent_models(&body)
 }
 
+async fn fetch_ai_service_models(
+    client: &reqwest::Client,
+    access_token: &str,
+) -> Result<Vec<String>> {
+    let response = client
+        .post(AVAILABLE_MODELS_API_URL)
+        .header("authorization", format!("Bearer {access_token}"))
+        .header("content-type", "application/proto")
+        .header("connect-protocol-version", "1")
+        .header("x-ghost-mode", "true")
+        .header("x-cursor-client-type", "cli")
+        .header(
+            "x-cursor-client-version",
+            agent_transport::cli_client_version(),
+        )
+        .body(Vec::<u8>::new())
+        .send()
+        .await
+        .context("Failed to fetch Cursor AiService model catalog")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = jcode_base::util::http_error_body(response, "HTTP error").await;
+        anyhow::bail!(
+            "Cursor AiService model catalog request failed ({}): {}",
+            status,
+            body.trim()
+        );
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_AGENT_MODELS_RESPONSE_BYTES)
+    {
+        anyhow::bail!("Cursor AiService model catalog response exceeded 4 MiB");
+    }
+    let mut response = response;
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .context("Failed to read Cursor AiService model catalog")?
+    {
+        if body.len() as u64 + chunk.len() as u64 > MAX_AGENT_MODELS_RESPONSE_BYTES {
+            anyhow::bail!("Cursor AiService model catalog response exceeded 4 MiB");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    decode_available_models(&body)
+}
+
 async fn fetch_cursor_catalog_once(
     client: &reqwest::Client,
     tokens: &cursor_auth::CursorDirectTokens,
 ) -> Result<Vec<String>> {
-    match fetch_agent_models(client, &tokens.access_token).await {
+    match fetch_ai_service_models(client, &tokens.access_token).await {
         Ok(models) if !models.is_empty() => Ok(models),
-        Ok(_) => {
-            fetch_available_models(client, CursorModelsAuth::Bearer(&tokens.access_token)).await
-        }
-        Err(agent_error) => {
-            fetch_available_models(client, CursorModelsAuth::Bearer(&tokens.access_token))
-                .await
-                .with_context(|| format!("AgentService discovery also failed: {agent_error:#}"))
-        }
+        Err(error) if is_rotatable_imported_cursor_error(&error) => Err(error),
+        Ok(_) | Err(_) => match fetch_agent_models(client, &tokens.access_token).await {
+            Ok(models) if !models.is_empty() => Ok(models),
+            Ok(_) => {
+                fetch_available_models(client, CursorModelsAuth::Bearer(&tokens.access_token)).await
+            }
+            Err(agent_error) => {
+                fetch_available_models(client, CursorModelsAuth::Bearer(&tokens.access_token))
+                    .await
+                    .with_context(|| format!("AgentService discovery also failed: {agent_error:#}"))
+            }
+        },
     }
 }
 
