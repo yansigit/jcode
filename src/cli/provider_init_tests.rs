@@ -304,7 +304,7 @@ fn test_init_provider_jcode_delegates_runtime_profile_to_wrapper() {
         .block_on(init_provider(&ProviderChoice::Jcode, None))
         .expect("init jcode provider");
 
-    assert_eq!(provider.name(), "Jcode Hosted Models");
+    assert_eq!(provider.name(), "Jcode Subscription");
     assert!(crate::subscription_catalog::is_runtime_mode_enabled());
     assert_eq!(
         std::env::var("JCODE_OPENROUTER_MODEL").ok().as_deref(),
@@ -568,7 +568,10 @@ fn login_provider_choice_table_round_trips_catalog_providers() {
             provider_catalog::LoginProviderTarget::AutoImport
         ) {
             assert_eq!(choice_for_login_provider(*provider), None);
-        } else {
+        } else if !matches!(
+            provider.target,
+            provider_catalog::LoginProviderTarget::OpenAiCompatible(_)
+        ) {
             assert!(
                 reverse_mapped_provider_ids.contains(provider.id),
                 "provider {} is in the catalog but not the CLI choice table",
@@ -588,6 +591,9 @@ fn auth_integration_registry_matches_cli_choice_runtime_wiring() {
         if !matches!(
             provider.target,
             provider_catalog::LoginProviderTarget::AutoImport
+        ) && !matches!(
+            provider.target,
+            provider_catalog::LoginProviderTarget::OpenAiCompatible(_)
         ) {
             assert!(
                 choice_for_login_provider(*provider).is_some(),

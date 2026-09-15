@@ -402,6 +402,9 @@ impl AuthStatus {
             || self.gemini == AuthState::Available
             || self.cursor == AuthState::Available
             || self.grok_build == AuthState::Available
+            || crate::provider_catalog::login_providers()
+                .iter()
+                .any(|provider| self.assessment_for_provider(*provider).is_available())
     }
 
     /// Emit a structured, non-secret snapshot of which providers currently have
