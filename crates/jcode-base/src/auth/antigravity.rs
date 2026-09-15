@@ -586,6 +586,47 @@ fn extract_project_id(value: Option<serde_json::Value>) -> Option<String> {
 mod tests {
     use super::*;
     use crate::storage::lock_test_env;
+    use tempfile::TempDir;
+
+    #[test]
+    fn imported_account_precedes_native_tokens_and_allows_valid_access_only_tokens() {
+        let _guard = lock_test_env();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        let temp = TempDir::new().unwrap();
+        crate::env::set_var("JCODE_HOME", temp.path());
+
+        save_tokens(&AntigravityTokens {
+            access_token: "native-access".to_string(),
+            refresh_token: "native-refresh".to_string(),
+            expires_at: chrono::Utc::now().timestamp_millis() + 60_000,
+            email: None,
+            project_id: None,
+        })
+        .unwrap();
+        crate::auth::imported_pool::import_opencodex_accounts(&serde_json::json!({
+            "google-antigravity": {
+                "activeAccountId": "imported-a",
+                "accounts": [{
+                    "id": "imported-a",
+                    "credential": {
+                        "access": "imported-access",
+                        "expires": chrono::Utc::now().timestamp_millis() + 60_000
+                    }
+                }]
+            }
+        }))
+        .unwrap();
+
+        let tokens = load_tokens().expect("imported Antigravity tokens");
+        assert_eq!(tokens.access_token, "imported-access");
+        assert!(tokens.refresh_token.is_empty());
+
+        if let Some(previous_home) = previous_home {
+            crate::env::set_var("JCODE_HOME", previous_home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
 
     #[test]
     fn build_auth_url_includes_antigravity_scope_and_redirect() {

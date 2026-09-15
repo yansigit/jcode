@@ -114,8 +114,11 @@ impl App {
             }
 
             let imported_providers: &[&str] = match provider.id {
-                "openai" => &["command-code", "openai"],
+                "claude" => &["anthropic", "claude"],
+                "openai" => &["command-code", "openai-codex", "openai_codex", "openai"],
                 "antigravity" => &["google-antigravity", "antigravity"],
+                "gemini" => &["google-gemini-cli", "gemini-cli", "gemini"],
+                "copilot" => &["github-copilot", "copilot"],
                 id => &[id],
             };
             for source_provider in imported_providers {
@@ -124,14 +127,19 @@ impl App {
                     continue;
                 }
                 for account in imported {
-                    let state = if account
+                    let usable = account
                         .expires_at
                         .map(|expires| expires > chrono::Utc::now().timestamp_millis())
                         .unwrap_or(true)
-                    {
-                        "ready"
-                    } else {
-                        "expired"
+                        || account
+                            .refresh_token
+                            .as_deref()
+                            .is_some_and(|refresh| !refresh.trim().is_empty());
+                    let state = match (account.active, usable) {
+                        (true, true) => "active",
+                        (true, false) => "active · expired",
+                        (false, true) => "ready",
+                        (false, false) => "expired",
                     };
                     items.push(AccountPickerItem::action(
                         provider.id,
@@ -145,7 +153,6 @@ impl App {
                         },
                     ));
                 }
-                break;
             }
 
             let state_label = match auth_state {

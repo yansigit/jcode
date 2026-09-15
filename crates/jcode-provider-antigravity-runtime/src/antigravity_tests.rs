@@ -1,4 +1,35 @@
 use super::*;
+
+#[test]
+fn imported_account_rotation_is_limited_to_auth_and_rate_limit_failures() {
+    let account = jcode_base::auth::imported_pool::ImportedAccount {
+        provider: "google-antigravity".to_string(),
+        account_id: "account-a".to_string(),
+        label: "account-a".to_string(),
+        access_token: "redacted".to_string(),
+        refresh_token: None,
+        expires_at: None,
+        source: "open-codex".to_string(),
+        active: true,
+    };
+    let auth = anyhow::anyhow!("outer request failure").context("HTTP 401 unauthorized");
+    let rate_limit = anyhow::anyhow!("HTTP 429 rate limit");
+    let network = anyhow::anyhow!("connection reset by peer");
+
+    assert!(should_rotate_imported_antigravity_account(
+        Some(&account),
+        &auth
+    ));
+    assert!(should_rotate_imported_antigravity_account(
+        Some(&account),
+        &rate_limit
+    ));
+    assert!(!should_rotate_imported_antigravity_account(
+        Some(&account),
+        &network
+    ));
+    assert!(!should_rotate_imported_antigravity_account(None, &auth));
+}
 use chrono::Utc;
 use jcode_provider_antigravity::{
     FetchAvailableModelsResponse, parse_fetch_available_models_response,

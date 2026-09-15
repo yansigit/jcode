@@ -196,6 +196,15 @@ fn imported_opencodex_account_switch_changes_antigravity_oauth_resolution() {
         "ag-access-b"
     );
 
+    crate::auth::imported_pool::record_failure("google-antigravity", "ag-b", "HTTP 429 rate limit")
+        .unwrap();
+    assert_eq!(
+        load_antigravity_oauth_tokens()
+            .expect("cooldown fallback account")
+            .access_token,
+        "ag-access-a"
+    );
+
     if let Some(prev) = prev {
         crate::env::set_var("JCODE_HOME", prev);
     } else {

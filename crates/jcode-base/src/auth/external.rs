@@ -319,20 +319,13 @@ pub fn load_cursor_oauth_tokens() -> Option<ExternalOAuthTokens> {
 /// continue using the old credential.
 fn load_active_imported_oauth_tokens(provider_keys: &[&str]) -> Option<ExternalOAuthTokens> {
     refresh_trusted_opencodex_import();
-    let imported = crate::auth::imported_pool::list();
-    let account = imported
-        .iter()
-        .filter(|account| provider_keys.contains(&account.provider.as_str()))
-        .find(|account| account.active)
-        .or_else(|| {
-            imported
-                .iter()
-                .find(|account| provider_keys.contains(&account.provider.as_str()))
-        })?;
+    let account = provider_keys.iter().find_map(|provider| {
+        crate::auth::imported_pool::active_or_next_eligible_account(provider)
+    })?;
 
-    let refresh_token = account.refresh_token.clone()?;
+    let refresh_token = account.refresh_token?;
     Some(ExternalOAuthTokens {
-        access_token: account.access_token.clone(),
+        access_token: account.access_token,
         refresh_token,
         expires_at: account.expires_at.unwrap_or(i64::MAX),
     })

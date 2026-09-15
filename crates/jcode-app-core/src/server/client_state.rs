@@ -37,18 +37,23 @@ static LAST_ATTACH_MODEL_PREFETCH: LazyLock<StdMutex<HashMap<String, Instant>>> 
     LazyLock::new(|| StdMutex::new(HashMap::new()));
 
 fn provider_has_dynamic_model_catalog(provider_name: &str) -> bool {
+    let normalized = provider_name.trim().to_ascii_lowercase();
     matches!(
-        provider_name.trim().to_ascii_lowercase().as_str(),
+        normalized.as_str(),
         "anthropic"
             | "claude"
             | "openai"
+            | "azure openai"
+            | "openai-compatible"
             | "openrouter"
             | "copilot"
+            | "github copilot"
             | "antigravity"
             | "gemini"
             | "cursor"
             | "bedrock"
-    )
+    ) || jcode_base::provider_catalog::openai_compatible_profile_id_for_display_name(provider_name)
+        .is_some()
 }
 
 fn should_skip_attach_model_prefetch(provider_name: &str, initial_models: &[String]) -> bool {

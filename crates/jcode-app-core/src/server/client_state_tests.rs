@@ -25,7 +25,21 @@ fn cursor_static_fallback_does_not_suppress_attach_prefetch() {
     assert!(!should_skip_attach_model_prefetch("antigravity", &models));
     assert!(!should_skip_attach_model_prefetch("gemini", &models));
     assert!(!should_skip_attach_model_prefetch("copilot", &models));
+    assert!(!should_skip_attach_model_prefetch(
+        "GitHub Copilot",
+        &models
+    ));
     assert!(!should_skip_attach_model_prefetch("openai", &models));
+    let opencode = jcode_base::provider_catalog::openai_compatible_profile_by_id("opencode")
+        .expect("OpenCode profile");
+    assert!(!should_skip_attach_model_prefetch(
+        opencode.display_name,
+        &models
+    ));
+    assert!(!should_skip_attach_model_prefetch(
+        "OpenAI-compatible",
+        &models
+    ));
     assert!(should_skip_attach_model_prefetch("jcode", &models));
     assert!(!should_skip_attach_model_prefetch("cursor", &[]));
 }

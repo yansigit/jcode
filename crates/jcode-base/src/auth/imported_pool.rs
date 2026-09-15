@@ -426,10 +426,15 @@ pub fn import_opencodex_accounts(value: &Value) -> Result<Vec<ImportedAccount>> 
     }
     let existing = list();
     let mut preserved_active = BTreeMap::new();
+    let mut existing_imports = BTreeMap::new();
     for account in existing
         .iter()
         .filter(|account| account.source == "open-codex")
     {
+        existing_imports.insert(
+            (account.provider.clone(), account.account_id.clone()),
+            account,
+        );
         if account.active {
             preserved_active.insert(account.provider.clone(), account.account_id.clone());
         }
@@ -439,6 +444,22 @@ pub fn import_opencodex_accounts(value: &Value) -> Result<Vec<ImportedAccount>> 
     // keeping a user's managed selection when that account still exists. Do
     // not let a source file's activeAccountId silently undo a local switch.
     for account in &mut accounts {
+        if let Some(existing) =
+            existing_imports.get(&(account.provider.clone(), account.account_id.clone()))
+        {
+            let managed_credentials_are_newer = match (existing.expires_at, account.expires_at) {
+                (Some(managed), Some(incoming)) => managed > incoming,
+                (Some(_), None) => true,
+                _ => false,
+            };
+            if managed_credentials_are_newer {
+                account.access_token.clone_from(&existing.access_token);
+                if existing.refresh_token.is_some() {
+                    account.refresh_token.clone_from(&existing.refresh_token);
+                }
+                account.expires_at = existing.expires_at;
+            }
+        }
         if let Some(active_id) = preserved_active.get(&account.provider) {
             account.active = &account.account_id == active_id;
         }
@@ -665,6 +686,49 @@ mod tests {
                 .iter()
                 .any(|account| account.account_id == "cursor-a" && account.active)
         );
+    }
+
+    #[test]
+    fn source_merge_preserves_newer_locally_refreshed_credentials() {
+        let _env_lock = crate::storage::lock_test_env();
+        let _home = TestHome::new();
+        let initial = json!({
+            "cursor": {"activeAccountId": "cursor-a", "accounts": [
+                {"id": "cursor-a", "credential": {
+                    "access": "source-old", "refresh": "source-refresh", "expires": 2_000
+                }}
+            ]}
+        });
+        import_opencodex_accounts(&initial).unwrap();
+        update_tokens(
+            "cursor",
+            "cursor-a",
+            "managed-new",
+            Some("managed-refresh"),
+            Some(9_000),
+        )
+        .unwrap();
+
+        let changed_source = json!({
+            "cursor": {"activeAccountId": "cursor-a", "accounts": [
+                {"id": "cursor-a", "credential": {
+                    "access": "source-old", "refresh": "source-refresh", "expires": 2_000
+                }},
+                {"id": "cursor-b", "credential": {
+                    "access": "source-b", "refresh": "source-refresh-b", "expires": 3_000
+                }}
+            ]}
+        });
+        import_opencodex_accounts(&changed_source).unwrap();
+
+        let account = list_provider("cursor")
+            .into_iter()
+            .find(|account| account.account_id == "cursor-a")
+            .unwrap();
+        assert_eq!(account.access_token, "managed-new");
+        assert_eq!(account.refresh_token.as_deref(), Some("managed-refresh"));
+        assert_eq!(account.expires_at, Some(9_000));
+        assert!(account.active);
     }
 
     #[test]

@@ -32,6 +32,13 @@ use uuid::Uuid;
 
 const DEFAULT_MODEL: &str = "default";
 
+fn should_rotate_imported_antigravity_account(
+    account: Option<&jcode_base::auth::imported_pool::ImportedAccount>,
+    error: &anyhow::Error,
+) -> bool {
+    account.is_some() && jcode_base::auth::imported_pool::is_rotatable_error(&format!("{error:#}"))
+}
+
 pub struct AntigravityProvider {
     client: reqwest::Client,
     model: Arc<RwLock<String>>,
@@ -136,7 +143,7 @@ impl AntigravityProvider {
     /// test is in the live catalog. The warm catalog is persisted exactly like
     /// the runtime's own prefetch so the rest of the process benefits.
     pub async fn fetch_live_model_ids_for_doctor(&self) -> Result<Vec<String>> {
-        let snapshot = self.fetch_available_models().await?;
+        let snapshot = fetch_catalog_with_account_retry(self).await?;
         if snapshot.models.is_empty() {
             anyhow::bail!("Antigravity model catalog returned no models");
         }
@@ -167,7 +174,7 @@ impl AntigravityProvider {
     /// (`remaining_fraction_milli`) and reset times. Persists the warm catalog
     /// like the runtime prefetch so the rest of the process benefits.
     pub async fn fetch_catalog_snapshot_for_usage(&self) -> Result<CatalogSnapshot> {
-        let snapshot = self.fetch_available_models().await?;
+        let snapshot = fetch_catalog_with_account_retry(self).await?;
         if snapshot.models.is_empty() {
             anyhow::bail!("Antigravity model catalog returned no models");
         }
@@ -476,14 +483,13 @@ impl AntigravityProvider {
                 Ok(response)
             }
             Err(error)
-                if jcode_base::auth::imported_pool::is_rotatable_error(&format!("{error:#}"))
-                    && failed_account.is_some() =>
+                if should_rotate_imported_antigravity_account(failed_account.as_ref(), &error) =>
             {
                 let failed_account = failed_account.expect("guarded by is_some");
                 let next = jcode_base::auth::imported_pool::rotate_to_next_account(
                     &failed_account.provider,
                     &failed_account.account_id,
-                    &error.to_string(),
+                    &format!("{error:#}"),
                 )?;
                 let Some(next) = next else {
                     return Err(error);
@@ -547,8 +553,7 @@ async fn fetch_catalog_with_account_retry(
             Ok(snapshot)
         }
         Err(error)
-            if failed_account.is_some()
-                && jcode_base::auth::imported_pool::is_rotatable_error(&format!("{error:#}")) =>
+            if should_rotate_imported_antigravity_account(failed_account.as_ref(), &error) =>
         {
             let failed_account = failed_account.expect("guarded by is_some");
             let next = jcode_base::auth::imported_pool::rotate_to_next_account(
