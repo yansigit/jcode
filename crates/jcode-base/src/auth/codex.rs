@@ -203,6 +203,68 @@ pub fn active_account_label() -> Option<String> {
     )
 }
 
+/// Return a stable logical identity for the credential behind the active
+/// account label. Pool labels are runtime slots and may point at the same
+/// OpenAI account, so they must not be used as the entitlement/catalog key.
+///
+/// The caller is responsible for hashing this value before persistence. The
+/// raw token is returned only to the in-process catalog scoping code.
+pub fn active_account_catalog_identity() -> Option<String> {
+    let auth = load_auth_file().ok()?;
+    let label = active_account_label()?;
+    let account = auth
+        .openai_accounts
+        .iter()
+        .find(|account| account.label == label)?;
+
+    account_catalog_identity(account)
+}
+
+/// Return legacy account labels that are backed by the same credential as the
+/// active account. This is used only to migrate pre-pooling, label-keyed
+/// caches. The returned labels contain no credential material.
+pub fn active_account_catalog_legacy_scopes() -> Vec<String> {
+    let Ok(auth) = load_auth_file() else {
+        return Vec::new();
+    };
+    let Some(active_label) = active_account_label() else {
+        return Vec::new();
+    };
+    let Some(active) = auth
+        .openai_accounts
+        .iter()
+        .find(|account| account.label == active_label)
+    else {
+        return Vec::new();
+    };
+
+    let Some(identity) = account_catalog_identity(active) else {
+        return vec![active.label.clone()];
+    };
+
+    auth.openai_accounts
+        .iter()
+        .filter(|account| account_catalog_identity(account).as_deref() == Some(identity.as_str()))
+        .map(|account| account.label.clone())
+        .collect()
+}
+
+fn account_catalog_identity(account: &OpenAiAccount) -> Option<String> {
+    account
+        .account_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| format!("account:{value}"))
+        .or_else(|| {
+            (!account.refresh_token.trim().is_empty())
+                .then(|| format!("refresh:{}", account.refresh_token))
+        })
+        .or_else(|| {
+            (!account.access_token.trim().is_empty())
+                .then(|| format!("access:{}", account.access_token))
+        })
+}
+
 pub fn set_active_account(label: &str) -> Result<()> {
     let _request_lease = crate::auth::provider_pool::try_acquire_account_request_lease("openai")
         .ok_or_else(|| {

@@ -51,29 +51,57 @@ fn test_openai_model_catalog_is_scoped_per_account() {
 }
 
 #[test]
-fn test_openai_live_catalog_replaces_static_fallback_list() {
+fn test_openai_model_catalog_is_shared_by_pool_labels_for_same_credential() {
+    with_clean_provider_test_env(|| {
+        let now_ms = chrono::Utc::now().timestamp_millis() + 60_000;
+        let first_label = crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+            label: "first-pool-slot".to_string(),
+            access_token: "access-one".to_string(),
+            refresh_token: "refresh-one".to_string(),
+            id_token: None,
+            account_id: Some("shared-account".to_string()),
+            expires_at: Some(now_ms),
+            email: Some("same@example.com".to_string()),
+        })
+        .unwrap();
+        let second_label = crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+            label: "second-pool-slot".to_string(),
+            access_token: "access-two".to_string(),
+            refresh_token: "refresh-two".to_string(),
+            id_token: None,
+            account_id: Some("shared-account".to_string()),
+            expires_at: Some(now_ms),
+            email: Some("same@example.com".to_string()),
+        })
+        .unwrap();
+
+        crate::auth::codex::set_active_account(&first_label).unwrap();
+        populate_account_models(vec!["shared-pool-model".to_string()]);
+
+        crate::auth::codex::set_active_account(&second_label).unwrap();
+        assert!(known_openai_model_ids().contains(&"shared-pool-model".to_string()));
+    });
+}
+
+#[test]
+fn test_openai_live_catalog_extends_static_fallback_list() {
     let _guard = crate::storage::lock_test_env();
     crate::auth::codex::set_active_account_override(Some("work".to_string()));
 
     populate_account_models(vec!["gpt-5.4-live-only".to_string()]);
     let models = known_openai_model_ids();
 
+    assert!(models.contains(&"gpt-5.4-live-only".to_string()));
+    assert!(models.contains(&"gpt-5.3-codex-spark".to_string()));
+    assert!(models.contains(&jcode_provider_core::CHATGPT_WEB_MODEL.to_string()));
+
+    // A live catalog may add provider-side models, but it must not hide the
+    // stable static OpenAI capability baseline.
+    assert!(models.contains(&"gpt-5.5".to_string()));
     assert_eq!(
-        models[..2],
-        [
-            "gpt-5.4-live-only".to_string(),
-            jcode_provider_core::CHATGPT_WEB_MODEL.to_string()
-        ]
+        model_availability_for_account("gpt-5.3-codex-spark").state,
+        AccountModelAvailabilityState::Unknown
     );
-    // The only entries allowed past the live catalog are the platform-API-only
-    // GPT Pro models, appended when an OPENAI_API_KEY is configured on the
-    // machine running the tests.
-    for extra in &models[2..] {
-        assert!(
-            jcode_provider_core::is_openai_api_only_pro_model(extra),
-            "unexpected non-pro extra model '{extra}' in live catalog list"
-        );
-    }
 
     crate::auth::codex::set_active_account_override(None);
 }
