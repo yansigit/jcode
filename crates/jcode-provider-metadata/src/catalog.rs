@@ -1274,7 +1274,7 @@ pub const COMMAND_CODE_MODELS: &[&str] = &[
     "moonshotai/Kimi-K3",
 ];
 
-pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 55] = [
+pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 54] = [
     AUTO_IMPORT_LOGIN_PROVIDER,
     CLAUDE_LOGIN_PROVIDER,
     ANTHROPIC_API_LOGIN_PROVIDER,
