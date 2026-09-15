@@ -36,8 +36,23 @@ fn optional_total_tokens(totals: TokenUsageTotals) -> Option<(u64, u64)> {
 static LAST_ATTACH_MODEL_PREFETCH: LazyLock<StdMutex<HashMap<String, Instant>>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
 
+fn provider_has_dynamic_model_catalog(provider_name: &str) -> bool {
+    matches!(
+        provider_name.trim().to_ascii_lowercase().as_str(),
+        "anthropic"
+            | "claude"
+            | "openai"
+            | "openrouter"
+            | "copilot"
+            | "antigravity"
+            | "gemini"
+            | "cursor"
+            | "bedrock"
+    )
+}
+
 fn should_skip_attach_model_prefetch(provider_name: &str, initial_models: &[String]) -> bool {
-    !initial_models.is_empty() && provider_name != "cursor"
+    !initial_models.is_empty() && !provider_has_dynamic_model_catalog(provider_name)
 }
 
 fn should_debounce_attach_model_prefetch(provider_name: &str) -> bool {

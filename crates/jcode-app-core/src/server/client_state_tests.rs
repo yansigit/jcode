@@ -20,7 +20,13 @@ use tokio::sync::{Mutex, RwLock, mpsc};
 fn cursor_static_fallback_does_not_suppress_attach_prefetch() {
     let models = vec!["composer-2.5".to_string()];
     assert!(!should_skip_attach_model_prefetch("cursor", &models));
-    assert!(should_skip_attach_model_prefetch("openai", &models));
+    // Agent::provider_name uses MultiProvider::display_name, which is title-cased.
+    assert!(!should_skip_attach_model_prefetch("Cursor", &models));
+    assert!(!should_skip_attach_model_prefetch("antigravity", &models));
+    assert!(!should_skip_attach_model_prefetch("gemini", &models));
+    assert!(!should_skip_attach_model_prefetch("copilot", &models));
+    assert!(!should_skip_attach_model_prefetch("openai", &models));
+    assert!(should_skip_attach_model_prefetch("jcode", &models));
     assert!(!should_skip_attach_model_prefetch("cursor", &[]));
 }
 
