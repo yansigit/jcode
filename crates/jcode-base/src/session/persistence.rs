@@ -397,6 +397,10 @@ impl Session {
             && self.custom_title.is_none()
             && self.title.is_none()
             && self.parent_id.is_none()
+            && self.model.is_none()
+            && self.provider_key.is_none()
+            && self.route_api_method.is_none()
+            && self.reasoning_effort.is_none()
         {
             return Ok(());
         }

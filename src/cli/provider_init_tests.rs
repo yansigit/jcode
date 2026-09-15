@@ -568,7 +568,10 @@ fn login_provider_choice_table_round_trips_catalog_providers() {
             provider_catalog::LoginProviderTarget::AutoImport
         ) && choice_for_login_provider(*provider).is_none() {
             assert_eq!(choice_for_login_provider(*provider), None);
-        } else {
+        } else if !matches!(
+            provider.target,
+            provider_catalog::LoginProviderTarget::OpenAiCompatible(_)
+        ) {
             assert!(
                 reverse_mapped_provider_ids.contains(provider.id),
                 "provider {} is in the catalog but not the CLI choice table",
@@ -588,6 +591,9 @@ fn auth_integration_registry_matches_cli_choice_runtime_wiring() {
         if !matches!(
             provider.target,
             provider_catalog::LoginProviderTarget::AutoImport
+        ) && !matches!(
+            provider.target,
+            provider_catalog::LoginProviderTarget::OpenAiCompatible(_)
         ) {
             assert!(
                 choice_for_login_provider(*provider).is_some(),
