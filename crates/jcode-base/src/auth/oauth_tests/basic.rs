@@ -116,15 +116,16 @@ fn save_claude_tokens_preserves_existing_account_metadata() -> Result<()> {
     let temp = tempfile::TempDir::new().map_err(|e| anyhow!(e))?;
     let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
 
-    crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
-        label: "claude-1".to_string(),
-        access: "old_access".to_string(),
-        refresh: "old_refresh".to_string(),
-        expires: 1,
-        email: Some("user@example.com".to_string()),
-        subscription_type: Some("pro".to_string()),
-        scopes: vec!["user:inference".to_string()],
-    })?;
+    let claude_label =
+        crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
+            label: "claude-1".to_string(),
+            access: "old_access".to_string(),
+            refresh: "old_refresh".to_string(),
+            expires: 1,
+            email: Some("user@example.com".to_string()),
+            subscription_type: Some("pro".to_string()),
+            scopes: vec!["user:inference".to_string()],
+        })?;
 
     let refreshed = OAuthTokens {
         access_token: "new_access".to_string(),
@@ -133,11 +134,11 @@ fn save_claude_tokens_preserves_existing_account_metadata() -> Result<()> {
         id_token: None,
         scopes: Vec::new(),
     };
-    save_claude_tokens_for_account(&refreshed, "claude-1")?;
+    save_claude_tokens_for_account(&refreshed, &claude_label)?;
 
     let account = crate::auth::claude::list_accounts()?
         .into_iter()
-        .find(|account| account.label == "claude-1")
+        .find(|account| account.label == claude_label)
         .expect("claude account should exist");
     assert_eq!(account.access, "new_access");
     assert_eq!(account.refresh, "new_refresh");
