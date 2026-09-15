@@ -14,6 +14,7 @@ pub mod gemini;
 pub mod google;
 pub(crate) mod google_oauth;
 pub mod grok_build;
+pub mod imported_pool;
 pub mod integration;
 pub mod lifecycle;
 pub mod login_diagnostics;

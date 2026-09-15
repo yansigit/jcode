@@ -144,6 +144,9 @@ pub fn trust_external_auth_source(source: ExternalAuthSource) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     crate::storage::write_json_secret(&snapshot, &value)?;
+    if matches!(source, ExternalAuthSource::OpenCode) {
+        crate::auth::imported_pool::import_opencodex_accounts(&value)?;
+    }
     super::AuthStatus::invalidate_cache();
     Ok(())
 }
