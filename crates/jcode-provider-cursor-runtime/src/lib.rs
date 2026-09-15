@@ -376,11 +376,7 @@ impl ToolResultMultiplexer {
         }
     }
 
-    pub fn register(
-        &self,
-        stream_uuid: &str,
-        tx: mpsc::Sender<NativeToolResult>,
-    ) -> StreamGuard {
+    pub fn register(&self, stream_uuid: &str, tx: mpsc::Sender<NativeToolResult>) -> StreamGuard {
         if let Ok(mut routes) = self.routes.lock() {
             routes.insert(stream_uuid.to_string(), tx);
         }

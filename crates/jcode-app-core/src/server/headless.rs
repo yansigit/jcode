@@ -163,6 +163,7 @@ pub(super) async fn create_headless_session(
     if selfdev_requested {
         new_agent.set_canary("self-dev");
     }
+    new_agent.persist_session()?;
 
     {
         let mut current = global_session_id.write().await;

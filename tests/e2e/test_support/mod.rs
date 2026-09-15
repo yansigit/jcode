@@ -784,7 +784,15 @@ pub(crate) async fn debug_create_headless_session_with_command(
                     .get("session_id")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| anyhow::anyhow!("missing session_id in debug response"))?;
-                return Ok(session_id.to_string());
+                let session_id = session_id.to_string();
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while Instant::now() < deadline {
+                    if Session::load(&session_id).is_ok() {
+                        return Ok(session_id);
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+                anyhow::bail!("session {session_id} was not persisted after debug creation");
             }
             _ => {}
         }
