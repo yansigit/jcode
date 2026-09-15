@@ -406,6 +406,10 @@ impl Agent {
         Self::new_with_initial_ownership(provider, registry, working_dir, parent_id, true)
     }
 
+    pub(crate) fn persist_session(&mut self) -> anyhow::Result<()> {
+        self.session.save()
+    }
+
     fn new_with_initial_ownership(
         provider: Arc<dyn Provider>,
         registry: Registry,
