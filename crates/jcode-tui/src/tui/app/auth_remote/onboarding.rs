@@ -282,6 +282,7 @@ impl App {
         let entries = [true, false].into_iter().map(|accept| PickerEntry {
             name: if accept { "Yes" } else { "No" }.into(),
             options: vec![PickerOption {
+                model: None,
                 provider: host.into(),
                 api_method: if offer { "import local login?" } else { "copy this login?" }.into(),
                 available: true,

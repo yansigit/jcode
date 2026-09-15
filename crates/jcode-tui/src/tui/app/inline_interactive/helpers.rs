@@ -104,6 +104,12 @@ pub(super) fn save_agent_model_override(
 }
 
 pub(super) fn model_entry_base_name(entry: &PickerEntry) -> String {
+    if let Some(model) = entry
+        .active_option()
+        .and_then(|option| option.model.as_ref())
+    {
+        return model.clone();
+    }
     if entry.effort.is_some() {
         entry
             .name
@@ -266,6 +272,7 @@ mod tests {
 
     fn route(provider: &str, api_method: &str) -> PickerOption {
         PickerOption {
+            model: None,
             provider: provider.to_string(),
             api_method: api_method.to_string(),
             available: true,
@@ -326,6 +333,22 @@ mod tests {
             crate::provider::RuntimeKey::OpenAiCompatible {
                 profile_id: Some("nvidia-nim".to_string())
             }
+        );
+    }
+
+    #[test]
+    fn grouped_cursor_option_preserves_exact_wire_model_id() {
+        let mut route = route("Cursor", "cursor");
+        route.model = Some("cursor-grok-4.6-high-fast".to_string());
+        let entry = entry("cursor-grok-4.6", route.clone());
+
+        assert_eq!(
+            picker_route_model_spec(&entry, &route),
+            "cursor:cursor-grok-4.6-high-fast"
+        );
+        assert_eq!(
+            picker_route_selection(&entry, &route).model,
+            "cursor-grok-4.6-high-fast"
         );
     }
 }

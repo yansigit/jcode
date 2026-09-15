@@ -1261,14 +1261,20 @@ impl PickerKind {
                 let provider = route.map(|option| option.provider.as_str()).unwrap_or("");
                 let method = route.map(|option| option.api_method.as_str()).unwrap_or("");
                 let detail = route.map(|option| option.detail.as_str()).unwrap_or("");
+                let option_models = entry
+                    .options
+                    .iter()
+                    .filter_map(|option| option.model.as_deref())
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 // Include the pretty name so a query like "opus 4.8" matches
                 // the row even though the underlying id is `claude-opus-4-8`.
                 let pretty =
                     crate::tui::app::helpers::model_names::pretty_known_model_family(&entry.name)
                         .unwrap_or_default();
                 format!(
-                    "{} {} {} {} {}",
-                    entry.name, pretty, provider, method, detail
+                    "{} {} {} {} {} {}",
+                    entry.name, option_models, pretty, provider, method, detail
                 )
             }
         }
@@ -1411,7 +1417,14 @@ fn estimate_picker_action_bytes(action: &PickerAction) -> usize {
 }
 
 fn estimate_picker_option_bytes(option: &PickerOption) -> usize {
-    option.provider.capacity() + option.api_method.capacity() + option.detail.capacity()
+    option
+        .model
+        .as_ref()
+        .map(|model| model.capacity())
+        .unwrap_or(0)
+        + option.provider.capacity()
+        + option.api_method.capacity()
+        + option.detail.capacity()
 }
 
 fn estimate_picker_entry_bytes(entry: &PickerEntry) -> usize {
@@ -1616,6 +1629,9 @@ impl PickerEntry {
 /// A single available option for a picker entry.
 #[derive(Debug, Clone)]
 pub struct PickerOption {
+    /// Exact provider model id when this option is a variant grouped under a
+    /// shared picker row. `None` means the entry name is the model id.
+    pub model: Option<String>,
     pub provider: String,
     pub api_method: String,
     pub available: bool,

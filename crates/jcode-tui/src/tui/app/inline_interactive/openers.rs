@@ -32,6 +32,7 @@ impl App {
             PickerEntry {
                 name: agent_model_target_label(target).to_string(),
                 options: vec![PickerOption {
+                    model: None,
                     provider: summary,
                     api_method: agent_model_target_config_path(target).to_string(),
                     available: true,
@@ -119,6 +120,7 @@ impl App {
                 PickerEntry {
                     name: provider.display_name.to_string(),
                     options: vec![PickerOption {
+                        model: None,
                         provider: provider.auth_kind.label().to_string(),
                         api_method: state_label.to_string(),
                         available: true,
@@ -151,6 +153,7 @@ impl App {
                 PickerEntry {
                     name: "All providers".to_string(),
                     options: vec![PickerOption {
+                        model: None,
                         provider: "all".to_string(),
                         api_method: "logout".to_string(),
                         available: true,
@@ -239,6 +242,7 @@ impl App {
                         PickerEntry {
                             name: saved.to_string(),
                             options: vec![PickerOption {
+                                model: None,
                                 provider: "saved override".to_string(),
                                 api_method: agent_model_target_config_path(target).to_string(),
                                 available: true,
@@ -269,6 +273,7 @@ impl App {
                 PickerEntry {
                     name: format!("inherit ({})", inherit_summary),
                     options: vec![PickerOption {
+                        model: None,
                         provider: "default".to_string(),
                         api_method: agent_model_target_config_path(target).to_string(),
                         available: true,

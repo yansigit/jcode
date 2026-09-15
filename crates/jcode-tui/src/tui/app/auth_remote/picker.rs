@@ -30,6 +30,7 @@ fn provider_entry(provider: LoginProviderDescriptor, host: &str) -> PickerEntry 
     entry(
         provider.display_name.into(),
         PickerOption {
+            model: None,
             provider: provider.auth_kind.label().into(),
             api_method: "checking remote".into(),
             available: true,
@@ -52,6 +53,7 @@ fn import_entry(provider: &'static str, label: &str, host: &str) -> PickerEntry 
     entry(
         format!("Import local {label} login"),
         PickerOption {
+            model: None,
             provider: "Local → SSH".into(),
             api_method: "confirm copy".into(),
             available: true,

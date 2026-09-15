@@ -564,6 +564,7 @@ impl App {
             models.push(crate::tui::PickerEntry {
                 name: account_display_name("Claude", &account.label, claude_accounts.len()),
                 options: vec![crate::tui::PickerOption {
+                    model: None,
                     provider: "Claude".to_string(),
                     api_method: if is_active {
                         "active".to_string()
@@ -619,6 +620,7 @@ impl App {
             models.push(crate::tui::PickerEntry {
                 name: account_display_name("OpenAI", &account.label, openai_accounts.len()),
                 options: vec![crate::tui::PickerOption {
+                    model: None,
                     provider: "OpenAI".to_string(),
                     api_method: if is_active {
                         "active".to_string()
@@ -651,6 +653,7 @@ impl App {
         models.push(crate::tui::PickerEntry {
             name: "new Claude account".to_string(),
             options: vec![crate::tui::PickerOption {
+                model: None,
                 provider: "Claude".to_string(),
                 api_method: "new".to_string(),
                 available: true,
@@ -675,6 +678,7 @@ impl App {
         models.push(crate::tui::PickerEntry {
             name: "new OpenAI account".to_string(),
             options: vec![crate::tui::PickerOption {
+                model: None,
                 provider: "OpenAI".to_string(),
                 api_method: "new".to_string(),
                 available: true,
@@ -705,6 +709,7 @@ impl App {
         models.push(crate::tui::PickerEntry {
             name: "replace Claude account".to_string(),
             options: vec![crate::tui::PickerOption {
+                model: None,
                 provider: "Claude".to_string(),
                 api_method: "replace".to_string(),
                 available: !claude_accounts.is_empty(),
@@ -740,6 +745,7 @@ impl App {
         models.push(crate::tui::PickerEntry {
             name: "replace OpenAI account".to_string(),
             options: vec![crate::tui::PickerOption {
+                model: None,
                 provider: "OpenAI".to_string(),
                 api_method: "replace".to_string(),
                 available: !openai_accounts.is_empty(),
@@ -769,6 +775,7 @@ impl App {
         models.push(crate::tui::PickerEntry {
             name: "account center".to_string(),
             options: vec![crate::tui::PickerOption {
+                model: None,
                 provider: "Accounts".to_string(),
                 api_method: "manage".to_string(),
                 available: true,
@@ -847,6 +854,7 @@ impl App {
             models.push(crate::tui::PickerEntry {
                 name: account_display_name("Claude", &account.label, accounts.len()),
                 options: vec![crate::tui::PickerOption {
+                    model: None,
                     provider: "Claude".to_string(),
                     api_method: if is_active {
                         "active".to_string()
@@ -885,6 +893,7 @@ impl App {
         models.push(crate::tui::PickerEntry {
             name: "new account".to_string(),
             options: vec![crate::tui::PickerOption {
+                model: None,
                 provider: "Claude".to_string(),
                 api_method: "new".to_string(),
                 available: true,
@@ -915,6 +924,7 @@ impl App {
         models.push(crate::tui::PickerEntry {
             name: "replace account".to_string(),
             options: vec![crate::tui::PickerOption {
+                model: None,
                 provider: "Claude".to_string(),
                 api_method: "replace".to_string(),
                 available: !accounts.is_empty(),
@@ -944,6 +954,7 @@ impl App {
         models.push(crate::tui::PickerEntry {
             name: "account center".to_string(),
             options: vec![crate::tui::PickerOption {
+                model: None,
                 provider: "Claude".to_string(),
                 api_method: "manage".to_string(),
                 available: true,
@@ -1003,6 +1014,7 @@ impl App {
             models.push(crate::tui::PickerEntry {
                 name: account_display_name("OpenAI", &account.label, accounts.len()),
                 options: vec![crate::tui::PickerOption {
+                    model: None,
                     provider: "OpenAI".to_string(),
                     api_method: if is_active {
                         "active".to_string()
@@ -1035,6 +1047,7 @@ impl App {
         models.push(crate::tui::PickerEntry {
             name: "new account".to_string(),
             options: vec![crate::tui::PickerOption {
+                model: None,
                 provider: "OpenAI".to_string(),
                 api_method: "new".to_string(),
                 available: true,
@@ -1065,6 +1078,7 @@ impl App {
         models.push(crate::tui::PickerEntry {
             name: "replace account".to_string(),
             options: vec![crate::tui::PickerOption {
+                model: None,
                 provider: "OpenAI".to_string(),
                 api_method: "replace".to_string(),
                 available: !accounts.is_empty(),
@@ -1094,6 +1108,7 @@ impl App {
         models.push(crate::tui::PickerEntry {
             name: "account center".to_string(),
             options: vec![crate::tui::PickerOption {
+                model: None,
                 provider: "OpenAI".to_string(),
                 api_method: "manage".to_string(),
                 available: true,

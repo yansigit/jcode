@@ -41,6 +41,18 @@ fn api_method_display(raw: &str) -> String {
     crate::provider::ModelRouteApiMethod::parse(raw).display_label()
 }
 
+fn picker_option_method_display(route: &crate::tui::PickerOption) -> String {
+    let method = api_method_display(&route.api_method);
+    if crate::provider::ModelRouteApiMethod::parse(&route.api_method)
+        == crate::provider::ModelRouteApiMethod::Cursor
+        && let Some(model) = route.model.as_deref()
+        && let Some(variant) = crate::provider::cursor::model_variant(model).label()
+    {
+        return format!("{method} · {variant}");
+    }
+    method
+}
+
 fn route_provider_display(provider: &str, api_method: &str) -> String {
     if crate::provider::ModelRouteApiMethod::parse(api_method).is_openrouter()
         && provider != "auto"
@@ -296,7 +308,7 @@ fn picker_render_width(picker: &crate::tui::InlineInteractiveState, max_width: u
                 provider_label
             };
             max_provider_len = max_provider_len.max(display_width(provider_label.as_str()));
-            max_via_len = max_via_len.max(display_width(&api_method_display(&route.api_method)));
+            max_via_len = max_via_len.max(display_width(&picker_option_method_display(route)));
         }
     }
 
@@ -418,7 +430,7 @@ pub(super) fn model_suggestion_lines(
             ));
             spans.push(Span::styled(" · ", dim));
             spans.push(Span::styled(
-                api_method_display(&route.api_method),
+                picker_option_method_display(route),
                 if row == selected && !picker.preview && picker.column == 2 {
                     route_style.bold().underlined()
                 } else {
@@ -498,7 +510,7 @@ pub(super) fn draw_inline_interactive(frame: &mut Frame, app: &dyn TuiState, are
         let route = entry.active_option();
         if let Some(r) = route {
             max_provider_len = max_provider_len.max(display_width(r.provider.as_str()));
-            max_via_len = max_via_len.max(display_width(&api_method_display(&r.api_method)));
+            max_via_len = max_via_len.max(display_width(&picker_option_method_display(r)));
         }
         if is_account_picker {
             let (title, _) = account_picker_entry_title(entry, show_account_provider_badge);
@@ -918,7 +930,7 @@ pub(super) fn draw_inline_interactive(frame: &mut Frame, app: &dyn TuiState, are
         };
 
         let via_raw = route
-            .map(|r| api_method_display(&r.api_method))
+            .map(picker_option_method_display)
             .unwrap_or_else(|| "-".to_string());
         let vw = via_width.saturating_sub(1);
         let via_display = format!(" {}", pad_left_display(via_raw.as_str(), vw));
@@ -1009,6 +1021,7 @@ mod tests {
             entries: vec![crate::tui::PickerEntry {
                 name: "gpt-5.4".to_string(),
                 options: vec![crate::tui::PickerOption {
+                    model: None,
                     provider: "openai".to_string(),
                     api_method: "oauth".to_string(),
                     available: true,
@@ -1034,6 +1047,7 @@ mod tests {
         let mut models = vec![crate::tui::PickerEntry {
             name: "work".to_string(),
             options: vec![crate::tui::PickerOption {
+                model: None,
                 provider: "Claude".to_string(),
                 api_method: "active".to_string(),
                 available: true,
@@ -1060,6 +1074,7 @@ mod tests {
             models.push(crate::tui::PickerEntry {
                 name: "personal".to_string(),
                 options: vec![crate::tui::PickerOption {
+                    model: None,
                     provider: "OpenAI".to_string(),
                     api_method: "saved".to_string(),
                     available: true,
@@ -1107,6 +1122,7 @@ mod tests {
             entries: vec![crate::tui::PickerEntry {
                 name: "Swarm / subagent".to_string(),
                 options: vec![crate::tui::PickerOption {
+                    model: None,
                     provider: "gpt-5 default".to_string(),
                     api_method: "agents.swarm_model".to_string(),
                     available: true,
@@ -1235,6 +1251,16 @@ mod tests {
         assert_eq!(api_method_display("openai-oauth"), "oauth");
         assert_eq!(api_method_display("openai-api-key"), "api key");
         assert_eq!(api_method_display("openai-compatible:comtegra"), "api key");
+
+        let route = crate::tui::PickerOption {
+            model: Some("cursor-grok-4.6-high-fast".to_string()),
+            provider: "Cursor".to_string(),
+            api_method: "cursor".to_string(),
+            available: true,
+            detail: String::new(),
+            estimated_reference_cost_micros: None,
+        };
+        assert_eq!(picker_option_method_display(&route), "cursor · high · fast");
     }
 
     #[test]

@@ -11,6 +11,7 @@ fn remote_model_picker_preview_state() -> crate::tui::InlineInteractiveState {
         entries: vec![crate::tui::PickerEntry {
             name: "gpt-5.5".to_string(),
             options: vec![crate::tui::PickerOption {
+                model: None,
                 provider: "OpenAI".to_string(),
                 api_method: "openai-api".to_string(),
                 available: true,

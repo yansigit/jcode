@@ -30,6 +30,7 @@ fn model_picker_entry() -> crate::tui::PickerEntry {
     crate::tui::PickerEntry {
         name: "gpt-5.4".to_string(),
         options: vec![crate::tui::PickerOption {
+            model: None,
             provider: "openai".to_string(),
             api_method: "oauth".to_string(),
             available: true,

@@ -607,6 +607,7 @@ impl App {
             PickerEntry {
                 name: "inherit (current active model)".to_string(),
                 options: vec![PickerOption {
+                    model: None,
                     provider: "session".to_string(),
                     api_method: "subagent_model".to_string(),
                     available: true,
@@ -1343,6 +1344,7 @@ impl App {
             entries: vec![PickerEntry {
                 name: model_label,
                 options: vec![PickerOption {
+                    model: None,
                     provider: self.provider.name().to_string(),
                     api_method: "current".to_string(),
                     available: true,
@@ -1617,13 +1619,21 @@ impl App {
         let mut model_order: Vec<String> = Vec::new();
         let mut model_options: BTreeMap<String, Vec<PickerOption>> = BTreeMap::new();
         for r in &routes {
-            if !model_options.contains_key(&r.model) {
-                model_order.push(r.model.clone());
+            let cursor_variant = (crate::provider::ModelRouteApiMethod::parse(&r.api_method)
+                == crate::provider::ModelRouteApiMethod::Cursor)
+                .then(|| crate::provider::cursor::model_variant(&r.model));
+            let grouped_name = cursor_variant
+                .filter(|variant| variant.is_variant())
+                .map(|variant| variant.base_model)
+                .unwrap_or(&r.model);
+            if !model_options.contains_key(grouped_name) {
+                model_order.push(grouped_name.to_string());
             }
             model_options
-                .entry(r.model.clone())
+                .entry(grouped_name.to_string())
                 .or_default()
                 .push(PickerOption {
+                    model: (grouped_name != r.model).then(|| r.model.clone()),
                     provider: r.provider.clone(),
                     api_method: r.api_method.clone(),
                     available: r.available,
@@ -1809,7 +1819,90 @@ impl App {
                 let or_created = openrouter_created_timestamp(name);
                 let is_old = old_threshold_secs > 0
                     && or_created.map(|t| t < old_threshold_secs).unwrap_or(false);
+                let has_cursor_variants = plain_routes.iter().any(|route| {
+                    crate::provider::ModelRouteApiMethod::parse(&route.api_method)
+                        == crate::provider::ModelRouteApiMethod::Cursor
+                        && route.model.is_some()
+                });
+                let mut cursor_routes = Vec::new();
+                let mut other_routes = Vec::new();
                 for route in plain_routes {
+                    if has_cursor_variants
+                        && crate::provider::ModelRouteApiMethod::parse(&route.api_method)
+                            == crate::provider::ModelRouteApiMethod::Cursor
+                    {
+                        cursor_routes.push(route);
+                    } else {
+                        other_routes.push(route);
+                    }
+                }
+
+                if !cursor_routes.is_empty() {
+                    cursor_routes.sort_by_key(|route| {
+                        let model = route.model.as_deref().unwrap_or(name);
+                        let variant = crate::provider::cursor::model_variant(model);
+                        let effort_rank = match variant.effort {
+                            None => 0,
+                            Some("none") => 1,
+                            Some("minimal") => 2,
+                            Some("extra-low") => 3,
+                            Some("low") => 4,
+                            Some("medium") => 5,
+                            Some("high") => 6,
+                            Some("xhigh" | "extra-high") => 7,
+                            Some("max") => 8,
+                            Some(_) => 9,
+                        };
+                        (effort_rank, variant.fast, model.to_string())
+                    });
+                    let selected_option = cursor_routes
+                        .iter()
+                        .position(|route| {
+                            route.model.as_deref().unwrap_or(name) == current_model
+                                && current_provider.eq_ignore_ascii_case("cursor")
+                        })
+                        .or_else(|| {
+                            cursor_routes.iter().position(|route| {
+                                let model = route.model.as_deref().unwrap_or(name);
+                                let variant = crate::provider::cursor::model_variant(model);
+                                variant.effort == Some("high") && !variant.fast
+                            })
+                        })
+                        .unwrap_or(0);
+                    let route = &cursor_routes[selected_option];
+                    let exact_name = route.model.as_deref().unwrap_or(name).to_string();
+                    let is_recommended = model_picker_route_is_recommended(&exact_name, route);
+                    let is_current = model_picker_route_is_current(
+                        &exact_name,
+                        route,
+                        &current_model,
+                        &current_provider,
+                        current_api_method.as_deref(),
+                    );
+                    let is_default = is_config_default(&exact_name, route, None);
+                    let recommendation_rank = model_picker_recommendation_rank(&exact_name);
+                    let usage_score =
+                        model_picker_usage_score(&usage_store, &exact_name, route, None);
+                    let is_favorite =
+                        model_picker_is_favorite(&favorites_store, &exact_name, route, None);
+                    entries.push(PickerEntry {
+                        name: name.clone(),
+                        options: cursor_routes,
+                        action: PickerAction::Model,
+                        selected_option,
+                        is_current,
+                        recommended: is_recommended,
+                        recommendation_rank,
+                        usage_score,
+                        old: is_old,
+                        created_date: or_created.map(format_created),
+                        effort: None,
+                        is_default,
+                        is_favorite,
+                    });
+                }
+
+                for route in other_routes {
                     let is_recommended = model_picker_route_is_recommended(name, &route);
                     let is_current = model_picker_route_is_current(
                         name,
@@ -4032,6 +4125,7 @@ mod tests {
 
     fn picker_option_with_method(provider: &str, api_method: &str) -> PickerOption {
         PickerOption {
+            model: None,
             provider: provider.to_string(),
             api_method: api_method.to_string(),
             available: true,
@@ -4428,6 +4522,7 @@ mod tests {
         let deepseek_direct_route =
             picker_option_with_method("DeepSeek", "openai-compatible:deepseek");
         let unavailable_openai_oauth_route = PickerOption {
+            model: None,
             available: false,
             ..openai_oauth_route.clone()
         };
@@ -4577,6 +4672,85 @@ mod tests {
             usage: None,
             cheapness: None,
         }
+    }
+
+    #[test]
+    fn cursor_picker_groups_effort_and_fast_wire_variants_under_one_family() {
+        let mut app = crate::tui::app::tests::create_test_app();
+        app.is_remote = true;
+        app.remote_provider_name = Some("Cursor".to_string());
+        app.remote_provider_model = Some("cursor-grok-4.6-high-fast".to_string());
+        let signature =
+            app.model_picker_cache_signature("cursor-grok-4.6-high-fast", None, None, None, &[]);
+        let routes = vec![
+            model_route("cursor-grok-4.6-low", "Cursor", "cursor"),
+            model_route("cursor-grok-4.6-low-fast", "Cursor", "cursor"),
+            model_route("cursor-grok-4.6-high", "Cursor", "cursor"),
+            model_route("cursor-grok-4.6-high-fast", "Cursor", "cursor"),
+            model_route("gpt-5.5-high", "Cursor", "cursor"),
+            model_route("gpt-5.5-extra-high-fast", "Cursor", "cursor"),
+            model_route("gemini-3.8-flash", "Cursor", "cursor"),
+        ];
+
+        app.open_model_picker_with_routes(
+            signature,
+            std::time::Instant::now(),
+            routes,
+            0,
+            false,
+            false,
+        );
+
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("model picker should open");
+        let mut grouped = picker
+            .entries
+            .iter()
+            .filter(|entry| entry.name == "cursor-grok-4.6");
+        let grok = grouped.next().expect("grouped Grok family should exist");
+        assert!(
+            grouped.next().is_none(),
+            "family should have one picker row"
+        );
+        assert_eq!(grok.options.len(), 4);
+        assert_eq!(
+            grok.options
+                .iter()
+                .filter_map(|option| option.model.as_deref())
+                .collect::<Vec<_>>(),
+            [
+                "cursor-grok-4.6-low",
+                "cursor-grok-4.6-low-fast",
+                "cursor-grok-4.6-high",
+                "cursor-grok-4.6-high-fast",
+            ]
+        );
+        assert_eq!(
+            grok.active_option()
+                .and_then(|option| option.model.as_deref()),
+            Some("cursor-grok-4.6-high-fast"),
+            "the exact current wire variant should remain selected"
+        );
+        assert!(
+            picker
+                .entries
+                .iter()
+                .any(|entry| entry.name == "gemini-3.8-flash"),
+            "unrelated Cursor models must remain separate"
+        );
+        let gpt = picker
+            .entries
+            .iter()
+            .find(|entry| entry.name == "gpt-5.5")
+            .expect("extra-high should group with the GPT 5.5 family");
+        assert_eq!(gpt.options.len(), 2);
+        assert!(
+            gpt.options
+                .iter()
+                .any(|option| { option.model.as_deref() == Some("gpt-5.5-extra-high-fast") })
+        );
     }
 
     #[test]

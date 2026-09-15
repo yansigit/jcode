@@ -2056,6 +2056,7 @@ fn test_model_picker_filter_text_includes_provider_and_method() {
     let entry = crate::tui::PickerEntry {
         name: "glm-51-nvfp4".to_string(),
         options: vec![crate::tui::PickerOption {
+            model: None,
             provider: "Comtegra GPU Cloud".to_string(),
             api_method: "openai-compatible:comtegra".to_string(),
             available: true,
