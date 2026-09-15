@@ -281,6 +281,15 @@ fn active_imported_cursor_account_precedes_local_auth_and_preserves_identity() {
 }
 
 #[test]
+fn cursor_jwt_expiry_is_persisted_as_epoch_milliseconds() {
+    let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"none"}"#);
+    let payload = URL_SAFE_NO_PAD.encode(br#"{"exp":1700000000}"#);
+    let token = format!("{header}.{payload}.signature");
+
+    assert_eq!(token_expiry_epoch_millis(&token), Some(1_700_000_000_000));
+}
+
+#[test]
 fn reads_cursor_state_with_embedded_sqlite() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("state.vscdb");

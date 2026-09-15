@@ -359,36 +359,7 @@ pub fn cursor_auth_file_path() -> Result<PathBuf> {
     }
 }
 
-/// Load direct Cursor tokens from env or Cursor's auth.json.
-pub fn load_access_token_from_env_or_file() -> Result<CursorDirectTokens> {
-    if let Ok(access_token) = std::env::var("CURSOR_ACCESS_TOKEN") {
-        let access_token = access_token.trim().to_string();
-        if !access_token.is_empty() {
-            let refresh_token = std::env::var("CURSOR_REFRESH_TOKEN")
-                .ok()
-                .map(|raw| raw.trim().to_string())
-                .filter(|raw| !raw.is_empty());
-            return Ok(CursorDirectTokens {
-                access_token,
-                refresh_token,
-                source: "env",
-                account_id: None,
-            });
-        }
-    }
-
-    // An imported account switch must take precedence over local Cursor IDE
-    // credentials. Keep the environment token branch above as the explicit
-    // override for unattended deployments.
-    if let Some(account) = crate::auth::imported_pool::active_or_next_eligible_account("cursor") {
-        return Ok(CursorDirectTokens {
-            access_token: account.access_token,
-            refresh_token: account.refresh_token,
-            source: "opencodex_auth",
-            account_id: Some(account.account_id),
-        });
-    }
-
+fn load_access_token_from_local_sources() -> Result<CursorDirectTokens> {
     let file_path = cursor_auth_file_path()?;
     if file_path.exists()
         && crate::config::Config::external_auth_source_allowed_for_path(
@@ -430,6 +401,39 @@ pub fn load_access_token_from_env_or_file() -> Result<CursorDirectTokens> {
     anyhow::bail!(
         "Cursor direct access token not found. Set CURSOR_ACCESS_TOKEN, log in with Cursor, or configure CURSOR_API_KEY."
     )
+}
+
+/// Load direct Cursor tokens from env, imported accounts, or local auth files.
+pub fn load_access_token_from_env_or_file() -> Result<CursorDirectTokens> {
+    if let Ok(access_token) = std::env::var("CURSOR_ACCESS_TOKEN") {
+        let access_token = access_token.trim().to_string();
+        if !access_token.is_empty() {
+            let refresh_token = std::env::var("CURSOR_REFRESH_TOKEN")
+                .ok()
+                .map(|raw| raw.trim().to_string())
+                .filter(|raw| !raw.is_empty());
+            return Ok(CursorDirectTokens {
+                access_token,
+                refresh_token,
+                source: "env",
+                account_id: None,
+            });
+        }
+    }
+
+    // An imported account switch must take precedence over local Cursor IDE
+    // credentials. Keep the environment token branch above as the explicit
+    // override for unattended deployments.
+    if let Some(account) = crate::auth::imported_pool::active_or_next_eligible_account("cursor") {
+        return Ok(CursorDirectTokens {
+            access_token: account.access_token,
+            refresh_token: account.refresh_token,
+            source: "opencodex_auth",
+            account_id: Some(account.account_id),
+        });
+    }
+
+    load_access_token_from_local_sources()
 }
 
 /// Resolve the best available direct-auth credentials for Cursor's native API.
@@ -477,13 +481,16 @@ pub async fn resolve_direct_tokens(client: &Client) -> Result<CursorDirectTokens
                 imported.account_id.as_deref().unwrap_or_default(),
                 &refreshed.access_token,
                 refreshed.refresh_token.as_deref(),
-                None,
+                token_expiry_epoch_millis(&refreshed.access_token),
             );
             return Ok(refreshed);
         }
     }
 
-    if let Ok(tokens) = load_access_token_from_env_or_file() {
+    // The imported account was already attempted above. Do not resolve through
+    // the public loader here, because it would select and refresh that same
+    // account a second time after a failed refresh.
+    if let Ok(tokens) = load_access_token_from_local_sources() {
         if !token_is_expiring_soon(&tokens.access_token) {
             return Ok(tokens);
         }
@@ -559,7 +566,7 @@ pub async fn refresh_resolved_tokens(
             account_id,
             &refreshed.access_token,
             refreshed.refresh_token.as_deref(),
-            None,
+            token_expiry_epoch_millis(&refreshed.access_token),
         );
     }
     Ok(refreshed)
@@ -713,6 +720,12 @@ fn token_expiry_epoch_secs(token: &str) -> Option<u64> {
     let payload = token.split('.').nth(1)?;
     let decoded = URL_SAFE_NO_PAD.decode(payload).ok()?;
     serde_json::from_slice::<JwtClaims>(&decoded).ok()?.exp
+}
+
+fn token_expiry_epoch_millis(token: &str) -> Option<i64> {
+    token_expiry_epoch_secs(token)
+        .and_then(|exp| exp.checked_mul(1_000))
+        .and_then(|exp| i64::try_from(exp).ok())
 }
 
 fn sha256_hex(input: &str) -> String {

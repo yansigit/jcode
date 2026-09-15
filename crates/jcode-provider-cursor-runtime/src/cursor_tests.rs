@@ -147,6 +147,21 @@ fn imported_cursor_retry_only_rotates_for_account_failures() {
     assert!(!should_rotate_imported_cursor_account(None, &auth_error));
 }
 
+#[test]
+fn imported_cursor_retry_tracks_all_account_auth_failure_shapes() {
+    let unauthenticated = anyhow::anyhow!("HTTP 401 unauthenticated");
+    let login_required = anyhow::anyhow!(r#"actionRequired":"login"#);
+    let malformed_request = anyhow::anyhow!("invalid request payload");
+
+    assert!(should_rotate_imported_cursor_account(
+        Some("cursor-a"),
+        &unauthenticated
+    ));
+    assert!(is_rotatable_imported_cursor_error(&unauthenticated));
+    assert!(is_rotatable_imported_cursor_error(&login_required));
+    assert!(!is_rotatable_imported_cursor_error(&malformed_request));
+}
+
 // ==========================================================================
 // Phase 07 Wire Codec & Contract Tests (Plan 07-01)
 // ==========================================================================

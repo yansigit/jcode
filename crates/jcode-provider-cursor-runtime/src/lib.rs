@@ -284,9 +284,20 @@ async fn resolve_cursor_tokens(
 }
 
 fn should_rotate_imported_cursor_account(account_id: Option<&str>, error: &anyhow::Error) -> bool {
-    account_id.is_some()
-        && (cursor_auth::error_indicates_not_logged_in(error)
-            || jcode_base::auth::imported_pool::is_rotatable_error(&format!("{error:#}")))
+    account_id.is_some() && is_rotatable_imported_cursor_error(error)
+}
+
+fn normalized_imported_cursor_error(error: &anyhow::Error) -> String {
+    let text = format!("{error:#}");
+    if cursor_auth::error_indicates_not_logged_in(error) {
+        format!("authentication: {text}")
+    } else {
+        text
+    }
+}
+
+fn is_rotatable_imported_cursor_error(error: &anyhow::Error) -> bool {
+    jcode_base::auth::imported_pool::is_rotatable_error(&normalized_imported_cursor_error(error))
 }
 
 async fn fetch_available_models(
@@ -413,7 +424,7 @@ async fn fetch_cursor_catalog_with_rotation(client: &reqwest::Client) -> Result<
         }
         Err(error) if should_rotate_imported_cursor_account(account_id.as_deref(), &error) => {
             let account_id = account_id.expect("guarded by is_some");
-            let error_text = format!("{error:#}");
+            let error_text = normalized_imported_cursor_error(&error);
             let Some(next_account) = jcode_base::auth::imported_pool::rotate_to_next_account(
                 CURSOR_IMPORTED_PROVIDER,
                 &account_id,
@@ -432,8 +443,8 @@ async fn fetch_cursor_catalog_with_rotation(client: &reqwest::Client) -> Result<
                     );
                 }
                 Err(retry_error) => {
-                    let retry_error_text = format!("{retry_error:#}");
-                    if jcode_base::auth::imported_pool::is_rotatable_error(&retry_error_text) {
+                    let retry_error_text = normalized_imported_cursor_error(retry_error);
+                    if is_rotatable_imported_cursor_error(retry_error) {
                         let _ = jcode_base::auth::imported_pool::record_failure(
                             CURSOR_IMPORTED_PROVIDER,
                             &next_account.account_id,
@@ -830,11 +841,7 @@ async fn run_native_text_command(
         }
         Err(err) if should_rotate_imported_cursor_account(imported_account_id.as_deref(), &err) => {
             let failed_account_id = imported_account_id.expect("guarded by is_some");
-            let error_text = if cursor_auth::error_indicates_not_logged_in(&err) {
-                format!("authentication: {err:#}")
-            } else {
-                format!("{err:#}")
-            };
+            let error_text = normalized_imported_cursor_error(&err);
             let Some(next_account) = jcode_base::auth::imported_pool::rotate_to_next_account(
                 CURSOR_IMPORTED_PROVIDER,
                 &failed_account_id,
@@ -864,8 +871,8 @@ async fn run_native_text_command(
                     );
                 }
                 Err(retry_error) => {
-                    let retry_error_text = format!("{retry_error:#}");
-                    if jcode_base::auth::imported_pool::is_rotatable_error(&retry_error_text) {
+                    let retry_error_text = normalized_imported_cursor_error(retry_error);
+                    if is_rotatable_imported_cursor_error(retry_error) {
                         let _ = jcode_base::auth::imported_pool::record_failure(
                             CURSOR_IMPORTED_PROVIDER,
                             &next_account.account_id,
