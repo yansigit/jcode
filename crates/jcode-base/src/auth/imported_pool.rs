@@ -88,6 +88,19 @@ fn cooldown_active(state: &ImportedAccountRuntimeState, now_ms: i64) -> bool {
     state.cooldown_until_ms.is_some_and(|until| until > now_ms)
 }
 
+/// An expired access token is still usable when the provider supplied a
+/// refresh token. Only an expired account with no refresh credential is
+/// ineligible for automatic use.
+fn expired_without_refresh(account: &ImportedAccount, now_ms: i64) -> bool {
+    account
+        .expires_at
+        .is_some_and(|expires_at| expires_at <= now_ms)
+        && account
+            .refresh_token
+            .as_deref()
+            .is_none_or(|refresh| refresh.trim().is_empty())
+}
+
 fn failure_kind(error: &str) -> &'static str {
     let lower = error.to_ascii_lowercase();
     if [
@@ -125,6 +138,13 @@ fn failure_kind(error: &str) -> &'static str {
     }
 }
 
+/// Whether a provider failure is safe to retry once with another imported
+/// account. This deliberately excludes malformed requests, network errors, and
+/// other failures that are not account-specific.
+pub fn is_rotatable_error(error: &str) -> bool {
+    matches!(failure_kind(error), "authentication" | "rate_limited")
+}
+
 fn cooldown_for(kind: &str, failures: u32) -> Duration {
     let base = match kind {
         "authentication" => DEFAULT_AUTH_COOLDOWN,
@@ -160,6 +180,7 @@ pub fn next_eligible_account(
         .enumerate()
         .filter(|(_, account)| {
             exclude_account_id != Some(account.account_id.as_str())
+                && !expired_without_refresh(account, now)
                 && !cooldown_active(
                     states
                         .get(&runtime_state_key(provider, &account.account_id))
@@ -184,11 +205,15 @@ pub fn next_eligible_account(
 /// manual account switches authoritative while preventing a persisted failure
 /// from pinning every later request to the same account.
 pub fn active_or_next_eligible_account(provider: &str) -> Option<ImportedAccount> {
+    let _guard = RUNTIME_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let now = now_ms();
     let states = load_runtime_states();
     let accounts = list_provider(provider);
     if let Some(account) = accounts.iter().find(|account| {
         account.active
+            && !expired_without_refresh(account, now)
             && !cooldown_active(
                 states
                     .get(&runtime_state_key(provider, &account.account_id))
@@ -198,7 +223,33 @@ pub fn active_or_next_eligible_account(provider: &str) -> Option<ImportedAccount
     }) {
         return Some(account.clone());
     }
-    next_eligible_account(provider, None)
+
+    let next = accounts
+        .into_iter()
+        .enumerate()
+        .filter(|(_, account)| !expired_without_refresh(account, now))
+        .filter(|(_, account)| {
+            !cooldown_active(
+                states
+                    .get(&runtime_state_key(provider, &account.account_id))
+                    .unwrap_or(&ImportedAccountRuntimeState::default()),
+                now,
+            )
+        })
+        .min_by_key(|(index, account)| {
+            (
+                states
+                    .get(&runtime_state_key(provider, &account.account_id))
+                    .and_then(|state| state.last_selected_at_ms)
+                    .unwrap_or_default(),
+                *index,
+            )
+        })
+        .map(|(_, account)| account);
+    if let Some(account) = &next {
+        set_active_unlocked(provider, &account.account_id).ok()?;
+    }
+    next
 }
 
 /// Record a provider failure without persisting the provider's error body.
@@ -271,6 +322,7 @@ pub fn rotate_to_next_account(
         .into_iter()
         .enumerate()
         .filter(|(_, account)| account.account_id != failed_account_id)
+        .filter(|(_, account)| !expired_without_refresh(account, now))
         .filter(|(_, account)| {
             !cooldown_active(
                 states
@@ -369,9 +421,34 @@ pub fn import_opencodex_accounts(value: &Value) -> Result<Vec<ImportedAccount>> 
             });
         }
     }
+    let existing = list();
+    let mut preserved_active = BTreeMap::new();
+    for account in existing
+        .iter()
+        .filter(|account| account.source == "open-codex")
+    {
+        if account.active {
+            preserved_active.insert(account.provider.clone(), account.account_id.clone());
+        }
+    }
+
+    // Replace the Open-Codex snapshot with the latest source contents, while
+    // keeping a user's managed selection when that account still exists. Do
+    // not let a source file's activeAccountId silently undo a local switch.
+    for account in &mut accounts {
+        if let Some(active_id) = preserved_active.get(&account.provider) {
+            account.active = &account.account_id == active_id;
+        }
+    }
+    let mut merged: Vec<ImportedAccount> = existing
+        .into_iter()
+        .filter(|account| account.source != "open-codex")
+        .collect();
+    merged.extend(accounts);
+
     let target = path()?;
-    crate::storage::write_json_secret(&target, &accounts)?;
-    Ok(accounts)
+    crate::storage::write_json_secret(&target, &merged)?;
+    Ok(merged)
 }
 
 pub fn list() -> Vec<ImportedAccount> {
@@ -420,6 +497,7 @@ mod tests {
 
     #[test]
     fn imports_every_nested_provider_account() {
+        let _env_lock = crate::storage::lock_test_env();
         let value = json!({
             "cursor": {"activeAccountId": "cursor-b", "accounts": [
                 {"id": "cursor-a", "alias": "first", "credential": {"access": "a", "refresh": "ra", "expires": 1}},
@@ -438,6 +516,7 @@ mod tests {
 
     #[test]
     fn skips_accounts_without_access_tokens() {
+        let _env_lock = crate::storage::lock_test_env();
         let value = json!({"cursor": {"accounts": [
             {"id": "missing", "credential": {"refresh": "r"}},
             {"id": "valid", "credential": {"access": "a"}}
@@ -452,9 +531,35 @@ mod tests {
         assert_eq!(failure_kind("HTTP 401 unauthorized"), "authentication");
         assert_eq!(failure_kind("HTTP 429 resource exhausted"), "rate_limited");
         assert_eq!(failure_kind("connection reset"), "other");
+        assert!(is_rotatable_error("HTTP 401 unauthorized"));
+        assert!(is_rotatable_error("HTTP 429 resource exhausted"));
+        assert!(!is_rotatable_error("malformed request"));
         assert_eq!(cooldown_for("rate_limited", 1), DEFAULT_RATE_LIMIT_COOLDOWN);
         assert_eq!(cooldown_for("authentication", 2), Duration::from_secs(600));
         assert_eq!(cooldown_for("authentication", 99), MAX_FAILURE_BACKOFF);
+    }
+
+    #[test]
+    fn expired_accounts_need_refresh_credentials_to_remain_eligible() {
+        let now = now_ms();
+        let expired_no_refresh_account = ImportedAccount {
+            provider: "cursor".to_string(),
+            account_id: "expired-no-refresh".to_string(),
+            label: "expired-no-refresh".to_string(),
+            access_token: "access".to_string(),
+            refresh_token: None,
+            expires_at: Some(now - 1),
+            source: "open-codex".to_string(),
+            active: false,
+        };
+        let expired_with_refresh = ImportedAccount {
+            refresh_token: Some("refresh".to_string()),
+            account_id: "expired-refreshable".to_string(),
+            label: "expired-refreshable".to_string(),
+            ..expired_no_refresh_account.clone()
+        };
+        assert!(expired_without_refresh(&expired_no_refresh_account, now));
+        assert!(!expired_without_refresh(&expired_with_refresh, now));
     }
 
     #[test]
@@ -492,6 +597,9 @@ mod tests {
                 .account_id,
             "cursor-b"
         );
+        assert!(list_provider("cursor")
+            .iter()
+            .any(|account| account.account_id == "cursor-b" && account.active));
 
         let state_path = runtime_state_path().unwrap();
         let raw_state = std::fs::read_to_string(state_path).unwrap();
