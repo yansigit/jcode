@@ -397,21 +397,51 @@ fn load_auth_map(source: ExternalAuthSource) -> Result<HashMap<String, Value>> {
     let value: Value = serde_json::from_str(&raw)
         .with_context(|| format!("Failed to parse {}", path.display()))?;
     match source {
-        ExternalAuthSource::OpenCode | ExternalAuthSource::Pi => {
-            // Flat `provider -> credential` maps.
-            Ok(value
-                .as_object()
-                .map(|object| {
-                    object
-                        .iter()
-                        .map(|(key, value)| (key.clone(), value.clone()))
-                        .collect()
-                })
-                .unwrap_or_default())
-        }
+        ExternalAuthSource::OpenCode => Ok(flatten_opencodex_auth_store(&value)),
+        ExternalAuthSource::Pi => Ok(value
+            .as_object()
+            .map(|object| {
+                object
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()),
         ExternalAuthSource::OpenClaw => Ok(flatten_openclaw_auth_store(&value)),
         ExternalAuthSource::Hermes => Ok(flatten_hermes_auth_store(&value)),
     }
+}
+
+/// Open-Codex (`~/.opencodex/auth.json`) stores each provider as an account
+/// pool, unlike OpenCode's flat `provider -> credential` file. Normalize the
+/// active account to the shared credential shape while retaining flat files.
+fn flatten_opencodex_auth_store(value: &Value) -> HashMap<String, Value> {
+    let Some(object) = value.as_object() else {
+        return HashMap::new();
+    };
+    let mut map = HashMap::new();
+    for (provider, entry) in object {
+        let Some(accounts) = entry.get("accounts").and_then(Value::as_array) else {
+            map.insert(provider.clone(), entry.clone());
+            continue;
+        };
+        let active_id = entry.get("activeAccountId").and_then(Value::as_str);
+        let selected = accounts
+            .iter()
+            .find(|account| {
+                active_id.is_some_and(|id| account.get("id").and_then(Value::as_str) == Some(id))
+            })
+            .or_else(|| accounts.first());
+        if let Some(credential) = selected.and_then(|account| account.get("credential")) {
+            let mut normalized = credential.clone();
+            if let Some(obj) = normalized.as_object_mut() {
+                obj.entry("type")
+                    .or_insert_with(|| Value::String("oauth".into()));
+            }
+            map.insert(provider.clone(), normalized);
+        }
+    }
+    map
 }
 
 /// OpenClaw historically used the flat pi-style `provider -> credential` map,
