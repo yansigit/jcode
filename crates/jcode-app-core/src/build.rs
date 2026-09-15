@@ -22,6 +22,7 @@ pub use jcode_build_support::{
     stable_version_file, update_canary_symlink, update_current_symlink,
     update_launcher_symlink_to_current, update_launcher_symlink_to_stable,
     update_shared_server_symlink, update_stable_symlink, version_binary_path,
-    version_matches_installed_channel, worktree_scope_key, write_build_progress,
-    write_current_dev_binary_source_metadata, write_dev_binary_source_metadata,
+    version_matches_installed_channel, with_builds_retention_lock, worktree_scope_key,
+    write_build_progress, write_current_dev_binary_source_metadata,
+    write_dev_binary_source_metadata,
 };

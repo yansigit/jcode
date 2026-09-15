@@ -9,6 +9,8 @@ use serde::Serialize;
 
 use super::args::StorageCommand;
 
+const BUILD_VERSION_MIN_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
 #[derive(Debug, Serialize)]
 struct StorageEntry {
     path: PathBuf,
@@ -46,8 +48,15 @@ pub(crate) fn run(action: StorageCommand) -> Result<()> {
             apply,
             keep_builds,
             scratch_min_age_hours,
+            include_clean_git,
             json,
-        } => run_cleanup(apply, keep_builds, scratch_min_age_hours, json),
+        } => run_cleanup(
+            apply,
+            keep_builds,
+            scratch_min_age_hours,
+            include_clean_git,
+            json,
+        ),
     }
 }
 
@@ -85,6 +94,7 @@ fn run_cleanup(
     apply: bool,
     keep_builds: usize,
     scratch_min_age_hours: u64,
+    include_clean_git: bool,
     json: bool,
 ) -> Result<()> {
     let jcode = crate::storage::jcode_dir()?;
@@ -102,23 +112,49 @@ fn run_cleanup(
         Duration::from_secs(scratch_min_age_hours.saturating_mul(3600)),
         SystemTime::now(),
         active_cwds.as_ref(),
+        include_clean_git,
     )?;
     candidates.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.path.cmp(&b.path)));
 
+    let candidate_bytes = candidates.iter().map(|item| item.bytes).sum();
     let mut reclaimed_bytes = 0u64;
     if apply {
-        for item in &candidates {
-            remove_path(&item.path)
-                .with_context(|| format!("failed to remove {}", item.path.display()))?;
-            reclaimed_bytes = reclaimed_bytes.saturating_add(item.bytes);
+        let mut removed = Vec::new();
+        let mut skipped_after_revalidation = 0usize;
+        for item in candidates {
+            let did_remove = if item.kind == "build-version" {
+                jcode_build_support::remove_unreferenced_build_version_in(
+                    &jcode.join("builds"),
+                    &item.path,
+                    BUILD_VERSION_MIN_AGE,
+                )?
+            } else {
+                remove_scratch_candidate_if_still_safe(
+                    &item.path,
+                    Duration::from_secs(scratch_min_age_hours.saturating_mul(3600)),
+                    include_clean_git,
+                )?
+            };
+            if did_remove {
+                reclaimed_bytes = reclaimed_bytes.saturating_add(item.bytes);
+                removed.push(item);
+            } else {
+                skipped_after_revalidation += 1;
+            }
         }
+        if skipped_after_revalidation > 0 {
+            warnings.push(format!(
+                "Skipped {skipped_after_revalidation} candidate(s) that became protected or changed before deletion"
+            ));
+        }
+        candidates = removed;
     }
     let report = CleanupReport {
         applied: apply,
         reclaimed_bytes: if apply {
             reclaimed_bytes
         } else {
-            candidates.iter().map(|item| item.bytes).sum()
+            candidate_bytes
         },
         candidates,
         warnings,
@@ -152,7 +188,9 @@ fn run_cleanup(
         report.candidates.len()
     );
     if !apply && !report.candidates.is_empty() {
-        println!("Re-run with `--apply` to delete exactly these candidates.");
+        println!(
+            "Re-run with `--apply` to recompute safety checks and delete candidates that remain eligible."
+        );
     }
     Ok(())
 }
@@ -179,6 +217,7 @@ fn cleanup_candidates(
     scratch_min_age: Duration,
     now: SystemTime,
     active_cwds: Option<&HashSet<PathBuf>>,
+    include_clean_git: bool,
 ) -> Result<Vec<CleanupItem>> {
     let mut items = Vec::new();
     if let Some(active_cwds) = active_cwds {
@@ -187,9 +226,15 @@ fn cleanup_candidates(
             scratch_min_age,
             now,
             active_cwds,
+            include_clean_git,
         )?);
     }
-    items.extend(old_build_candidates(&jcode.join("builds"), keep_builds)?);
+    items.extend(old_build_candidates(
+        &jcode.join("builds"),
+        keep_builds,
+        BUILD_VERSION_MIN_AGE,
+        now,
+    )?);
     Ok(items)
 }
 
@@ -198,6 +243,7 @@ fn stale_scratch_candidates(
     min_age: Duration,
     now: SystemTime,
     active_cwds: &HashSet<PathBuf>,
+    include_clean_git: bool,
 ) -> Result<Vec<CleanupItem>> {
     let Ok(entries) = fs::read_dir(scratch) else {
         return Ok(Vec::new());
@@ -205,18 +251,11 @@ fn stale_scratch_candidates(
     let mut items = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.join(".jcode-keep").exists() || path_is_active(&path, active_cwds) {
-            continue;
-        }
-        let Ok((bytes, modified)) = path_stats(&path) else {
-            continue;
-        };
-        let Ok(age) = now.duration_since(modified) else {
+        let Some(bytes) =
+            scratch_path_deletable_bytes(&path, min_age, now, active_cwds, include_clean_git)
+        else {
             continue;
         };
-        if age < min_age {
-            continue;
-        }
         items.push(CleanupItem {
             kind: "scratch",
             bytes,
@@ -230,12 +269,17 @@ fn stale_scratch_candidates(
     Ok(items)
 }
 
-fn old_build_candidates(builds: &Path, keep_builds: usize) -> Result<Vec<CleanupItem>> {
+fn old_build_candidates(
+    builds: &Path,
+    keep_builds: usize,
+    min_age: Duration,
+    now: SystemTime,
+) -> Result<Vec<CleanupItem>> {
     let versions = builds.join("versions");
     let Ok(entries) = fs::read_dir(&versions) else {
         return Ok(Vec::new());
     };
-    let protected = protected_build_versions(builds);
+    let protected = jcode_build_support::protected_build_versions_in(builds)?;
     let mut unprotected = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
@@ -258,61 +302,162 @@ fn old_build_candidates(builds: &Path, keep_builds: usize) -> Result<Vec<Cleanup
     Ok(unprotected
         .into_iter()
         .skip(keep_builds)
-        .map(|(_, path)| CleanupItem {
-            kind: "build-version",
-            bytes: path_size(&path).unwrap_or(0),
-            path,
-            reason: format!("unreferenced and older than the newest {keep_builds}"),
+        .filter_map(|(modified, path)| {
+            now.duration_since(modified)
+                .ok()
+                .filter(|age| *age >= min_age)
+                .map(|_| CleanupItem {
+                    kind: "build-version",
+                    bytes: path_size(&path).unwrap_or(0),
+                    path,
+                    reason: format!(
+                        "unreferenced, at least {}h old, and older than the newest {keep_builds}",
+                        min_age.as_secs() / 3600
+                    ),
+                })
         })
         .collect())
 }
 
-fn protected_build_versions(builds: &Path) -> HashSet<String> {
-    let mut protected = HashSet::new();
-    for marker in [
-        "current-version",
-        "stable-version",
-        "shared-server-version",
-        "canary-version",
-    ] {
-        if let Ok(value) = fs::read_to_string(builds.join(marker)) {
-            let value = value.trim();
-            if !value.is_empty() {
-                protected.insert(value.to_string());
-            }
-        }
-    }
-    for channel in ["current", "stable", "shared-server", "canary"] {
-        let binary = builds.join(channel).join(jcode_binary_name());
-        if let Ok(target) = binary.canonicalize()
-            && let Some(name) = target
-                .parent()
-                .and_then(Path::file_name)
-                .and_then(|name| name.to_str())
-        {
-            protected.insert(name.to_string());
-        }
-    }
-    if let Ok(exe) = std::env::current_exe()
-        && let Ok(exe) = exe.canonicalize()
-        && let Some(name) = exe
-            .parent()
-            .and_then(Path::file_name)
-            .and_then(|name| name.to_str())
+fn remove_scratch_candidate_if_still_safe(
+    path: &Path,
+    min_age: Duration,
+    include_clean_git: bool,
+) -> Result<bool> {
+    let Some(active_cwds) = active_working_directories() else {
+        return Ok(false);
+    };
+    if scratch_path_deletable_bytes(
+        path,
+        min_age,
+        SystemTime::now(),
+        &active_cwds,
+        include_clean_git,
+    )
+    .is_none()
     {
-        protected.insert(name.to_string());
+        return Ok(false);
     }
-    protected
+
+    let Some(parent) = path.parent() else {
+        return Ok(false);
+    };
+    let quarantine = (0..100).find_map(|attempt| {
+        let candidate = parent.join(format!(".jcode-cleanup-{}-{attempt}", std::process::id()));
+        (!candidate.exists()).then_some(candidate)
+    });
+    let Some(quarantine) = quarantine else {
+        return Ok(false);
+    };
+    fs::rename(path, &quarantine)
+        .with_context(|| format!("failed to quarantine {}", path.display()))?;
+
+    let safe_after_rename = active_working_directories().is_some_and(|active_cwds| {
+        scratch_path_deletable_bytes(
+            &quarantine,
+            min_age,
+            SystemTime::now(),
+            &active_cwds,
+            include_clean_git,
+        )
+        .is_some()
+    });
+    if !safe_after_rename {
+        fs::rename(&quarantine, path).with_context(|| {
+            format!(
+                "failed to restore protected scratch candidate {}",
+                path.display()
+            )
+        })?;
+        return Ok(false);
+    }
+    remove_path(&quarantine).with_context(|| {
+        format!(
+            "failed to remove quarantined scratch path {}",
+            path.display()
+        )
+    })?;
+    Ok(true)
 }
 
-fn jcode_binary_name() -> &'static str {
-    if cfg!(windows) { "jcode.exe" } else { "jcode" }
+fn scratch_path_deletable_bytes(
+    path: &Path,
+    min_age: Duration,
+    now: SystemTime,
+    active_cwds: &HashSet<PathBuf>,
+    include_clean_git: bool,
+) -> Option<u64> {
+    if path.join(".jcode-keep").exists()
+        || path_is_active(path, &active_cwds)
+        || scratch_git_worktree_needs_preservation(
+            path,
+            include_clean_git || path.join(".jcode-disposable").exists(),
+        )
+    {
+        return None;
+    }
+    path_stats(path)
+        .ok()
+        .and_then(|(bytes, modified)| now.duration_since(modified).ok().map(|age| (bytes, age)))
+        .filter(|(_, age)| *age >= min_age)
+        .map(|(bytes, _)| bytes)
 }
 
 fn path_is_active(path: &Path, active_cwds: &HashSet<PathBuf>) -> bool {
     active_cwds
         .iter()
         .any(|cwd| cwd == path || cwd.starts_with(path))
+}
+
+fn scratch_git_worktree_needs_preservation(path: &Path, include_clean_git: bool) -> bool {
+    let Some(worktrees) = nested_git_worktrees(path, include_clean_git) else {
+        return true;
+    };
+    if worktrees.is_empty() {
+        return false;
+    }
+    if !include_clean_git {
+        return true;
+    }
+    for worktree in worktrees {
+        let output = std::process::Command::new("git")
+            .args([
+                "-C",
+                worktree.to_string_lossy().as_ref(),
+                "status",
+                "--porcelain",
+            ])
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .output();
+        if !matches!(output, Ok(output) if output.status.success() && output.stdout.is_empty()) {
+            return true;
+        }
+    }
+    false
+}
+
+fn nested_git_worktrees(path: &Path, collect_all: bool) -> Option<Vec<PathBuf>> {
+    let mut worktrees = Vec::new();
+    let mut pending = vec![path.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let entries = fs::read_dir(&dir).ok()?;
+        for entry in entries {
+            let entry = entry.ok()?;
+            let child = entry.path();
+            if entry.file_name() == ".git" {
+                worktrees.push(dir.clone());
+                if !collect_all {
+                    return Some(worktrees);
+                }
+                continue;
+            }
+            let file_type = entry.file_type().ok()?;
+            if file_type.is_dir() && !file_type.is_symlink() {
+                pending.push(child);
+            }
+        }
+    }
+    Some(worktrees)
 }
 
 fn remove_path(path: &Path) -> io::Result<()> {
@@ -433,12 +578,41 @@ mod tests {
     fn build_cleanup_keeps_channels_and_requested_unreferenced_count() {
         let temp = tempfile::tempdir().unwrap();
         let builds = temp.path().join("builds");
-        for name in ["stable", "current", "old-a", "old-b", "newest"] {
+        for name in [
+            "stable",
+            "current",
+            "pending-new",
+            "old-a",
+            "old-b",
+            "newest",
+        ] {
             write_bytes(&builds.join("versions").join(name).join("jcode"), 16);
         }
         fs::write(builds.join("stable-version"), "stable\n").unwrap();
         fs::write(builds.join("current-version"), "current\n").unwrap();
-        let mut candidates = old_build_candidates(&builds, 1).unwrap();
+        fs::write(
+            builds.join("manifest.json"),
+            serde_json::to_vec(&jcode_build_support::BuildManifest {
+                pending_activation: Some(jcode_build_support::PendingActivation {
+                    session_id: "session-test".to_string(),
+                    new_version: "pending-new".to_string(),
+                    previous_current_version: None,
+                    previous_shared_server_version: None,
+                    source_fingerprint: None,
+                    requested_at: chrono::Utc::now(),
+                }),
+                ..jcode_build_support::BuildManifest::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let mut candidates = old_build_candidates(
+            &builds,
+            1,
+            BUILD_VERSION_MIN_AGE,
+            SystemTime::now() + Duration::from_secs(48 * 3600),
+        )
+        .unwrap();
         candidates.sort_by(|a, b| a.path.cmp(&b.path));
         let names: Vec<_> = candidates
             .iter()
@@ -448,6 +622,7 @@ mod tests {
         assert!(names.contains(&"old-a") || names.contains(&"old-b"));
         assert!(!names.contains(&"stable"));
         assert!(!names.contains(&"current"));
+        assert!(!names.contains(&"pending-new"));
     }
 
     #[test]
@@ -467,6 +642,7 @@ mod tests {
             Duration::from_secs(24 * 3600),
             SystemTime::now(),
             &active_cwds,
+            false,
         )
         .unwrap();
         assert!(recent.is_empty());
@@ -477,11 +653,56 @@ mod tests {
             Duration::from_secs(24 * 3600),
             future,
             &active_cwds,
+            false,
         )
         .unwrap();
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].path, stale);
         assert_eq!(candidates[0].bytes, 32);
+    }
+
+    #[test]
+    fn scratch_apply_revalidation_honors_new_protection_and_modifications() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("candidate");
+        write_bytes(&path.join("artifact"), 32);
+        let future = SystemTime::now() + Duration::from_secs(48 * 3600);
+        let active_cwds = HashSet::new();
+
+        assert_eq!(
+            scratch_path_deletable_bytes(
+                &path,
+                Duration::from_secs(24 * 3600),
+                future,
+                &active_cwds,
+                false,
+            ),
+            Some(32)
+        );
+
+        fs::write(path.join(".jcode-keep"), "").unwrap();
+        assert_eq!(
+            scratch_path_deletable_bytes(
+                &path,
+                Duration::from_secs(24 * 3600),
+                future,
+                &active_cwds,
+                false,
+            ),
+            None
+        );
+        fs::remove_file(path.join(".jcode-keep")).unwrap();
+
+        assert_eq!(
+            scratch_path_deletable_bytes(
+                &path,
+                Duration::from_secs(24 * 3600),
+                SystemTime::now(),
+                &active_cwds,
+                false,
+            ),
+            None
+        );
     }
 
     #[test]
@@ -497,9 +718,90 @@ mod tests {
             Duration::from_secs(2),
             before_update + Duration::from_secs(1),
             &HashSet::new(),
+            false,
         )
         .unwrap();
         assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn scratch_cleanup_preserves_git_worktrees_with_uncommitted_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let scratch = temp.path().join("scratch");
+        let root = scratch.join("outer");
+        let checkout = root.join("nested");
+        fs::create_dir_all(&checkout).unwrap();
+        for args in [
+            vec!["init"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test User"],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&checkout)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        fs::write(checkout.join("tracked"), "clean").unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["add", "tracked"])
+                .current_dir(&checkout)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .args(["commit", "-m", "fixture"])
+                .current_dir(&checkout)
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::write(checkout.join("tracked"), "modified").unwrap();
+
+        let candidates = stale_scratch_candidates(
+            &scratch,
+            Duration::ZERO,
+            SystemTime::now() + Duration::from_secs(1),
+            &HashSet::new(),
+            true,
+        )
+        .unwrap();
+        assert!(candidates.is_empty());
+
+        assert!(
+            std::process::Command::new("git")
+                .args(["checkout", "--", "tracked"])
+                .current_dir(&checkout)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let default_clean_candidates = stale_scratch_candidates(
+            &scratch,
+            Duration::ZERO,
+            SystemTime::now() + Duration::from_secs(1),
+            &HashSet::new(),
+            false,
+        )
+        .unwrap();
+        assert!(default_clean_candidates.is_empty());
+
+        let clean_candidates = stale_scratch_candidates(
+            &scratch,
+            Duration::ZERO,
+            SystemTime::now() + Duration::from_secs(1),
+            &HashSet::new(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(clean_candidates.len(), 1);
+        assert_eq!(clean_candidates[0].path, root);
     }
 
     #[test]

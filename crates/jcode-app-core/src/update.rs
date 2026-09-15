@@ -1026,50 +1026,54 @@ pub fn download_and_install_blocking_with_progress(
         crate::platform::set_permissions_executable(&extracted_binary)?;
 
         let version = release.tag_name.trim_start_matches('v');
-        let dest_dir = build::builds_dir()?.join("versions").join(version);
-        fs::create_dir_all(&dest_dir).context("Failed to create version install dir")?;
-        let mut installed_files = Vec::new();
-        for entry in fs::read_dir(&extract_dir).context("Failed to read extracted archive")? {
-            let entry = entry?;
-            if !entry.file_type()?.is_file() {
-                continue;
+        let builds = build::builds_dir()?;
+        let versioned_path = build::with_builds_retention_lock(&builds, || {
+            let dest_dir = builds.join("versions").join(version);
+            fs::create_dir_all(&dest_dir).context("Failed to create version install dir")?;
+            let mut installed_files = Vec::new();
+            for entry in fs::read_dir(&extract_dir).context("Failed to read extracted archive")? {
+                let entry = entry?;
+                if !entry.file_type()?.is_file() {
+                    continue;
+                }
+                let name = entry.file_name();
+                let name_string = name.to_string_lossy();
+                let dest_name = if name_string == get_asset_name()
+                    || name_string == format!("{}.exe", get_asset_name())
+                {
+                    build::binary_name().to_string()
+                } else {
+                    name_string.to_string()
+                };
+                let dest = dest_dir.join(dest_name);
+                if dest.exists() {
+                    fs::remove_file(&dest)?;
+                }
+                fs::copy(entry.path(), &dest)
+                    .with_context(|| format!("Failed to install {}", dest.display()))?;
+                if dest
+                    .file_name()
+                    .is_some_and(|name| name == build::binary_name())
+                    || dest.extension().is_some_and(|ext| ext == "bin")
+                {
+                    crate::platform::set_permissions_executable(&dest)?;
+                }
+                installed_files.push(dest);
             }
-            let name = entry.file_name();
-            let name_string = name.to_string_lossy();
-            let dest_name = if name_string == get_asset_name()
-                || name_string == format!("{}.exe", get_asset_name())
-            {
-                build::binary_name().to_string()
-            } else {
-                name_string.to_string()
-            };
-            let dest = dest_dir.join(dest_name);
-            if dest.exists() {
-                fs::remove_file(&dest)?;
+            // Give every installed file the same mtime. The wrapper script and the
+            // `.bin` payload otherwise land with whatever sub-second skew the copy
+            // loop produced, and any code comparing binary freshness by mtime then
+            // sees two "different age" files for one logical install.
+            let install_stamp = SystemTime::now();
+            for path in &installed_files {
+                if let Ok(file) = fs::File::options().write(true).open(path) {
+                    let _ = file.set_modified(install_stamp);
+                }
             }
-            fs::copy(entry.path(), &dest)
-                .with_context(|| format!("Failed to install {}", dest.display()))?;
-            if dest
-                .file_name()
-                .is_some_and(|name| name == build::binary_name())
-                || dest.extension().is_some_and(|ext| ext == "bin")
-            {
-                crate::platform::set_permissions_executable(&dest)?;
-            }
-            installed_files.push(dest);
-        }
-        // Give every installed file the same mtime. The wrapper script and the
-        // `.bin` payload otherwise land with whatever sub-second skew the copy
-        // loop produced, and any code comparing binary freshness by mtime then
-        // sees two "different age" files for one logical install.
-        let install_stamp = SystemTime::now();
-        for path in &installed_files {
-            if let Ok(file) = fs::File::options().write(true).open(path) {
-                let _ = file.set_modified(install_stamp);
-            }
-        }
+            Ok(dest_dir.join(build::binary_name()))
+        })?;
         let _ = fs::remove_dir_all(&extract_dir);
-        installed_version_dir = Some(dest_dir.join(build::binary_name()));
+        installed_version_dir = Some(versioned_path);
     } else {
         fs::write(&temp_path, &bytes).context("Failed to write temp file")?;
     }

@@ -618,11 +618,14 @@ pub(crate) enum StorageCommand {
         #[arg(long)]
         apply: bool,
         /// Preserve this many newest unreferenced build versions, in addition to all active channels
-        #[arg(long, default_value_t = 8)]
+        #[arg(long, default_value_t = 1)]
         keep_builds: usize,
         /// Only consider scratch entries older than this many hours
         #[arg(long, default_value_t = 24)]
         scratch_min_age_hours: u64,
+        /// Allow cleanup of clean Git worktrees. Dirty or unreadable worktrees remain protected.
+        #[arg(long)]
+        include_clean_git: bool,
         /// Emit JSON instead of plain text
         #[arg(long)]
         json: bool,

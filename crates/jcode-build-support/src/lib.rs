@@ -28,14 +28,21 @@ pub use storage_helpers::{
 
 use anyhow::Result;
 use chrono::Utc;
+use fs2::FileExt;
 use jcode_storage as storage;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::fs::OpenOptions;
 #[cfg(unix)]
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(unix)]
-use std::time::{Duration, Instant};
+use std::time::Instant;
+use std::time::{Duration, SystemTime};
+
+const AUTO_RETAIN_UNREFERENCED_BUILD_VERSIONS: usize = 1;
+const AUTO_PRUNE_BUILD_MIN_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 pub use jcode_selfdev_types::{
     BinaryChoice, BinaryVersionReport, BuildInfo, CanaryStatus, CrashInfo, DevBinarySourceMetadata,
@@ -78,8 +85,26 @@ impl BuildManifest {
 
     /// Save manifest to disk
     pub fn save(&self) -> Result<()> {
-        let path = manifest_path()?;
-        storage::write_json(&path, self)
+        let builds = builds_dir()?;
+        with_builds_retention_lock(&builds, || {
+            let path = builds.join("manifest.json");
+            let previous = if path.exists() {
+                storage::read_json::<BuildManifest>(&path)?
+            } else {
+                BuildManifest::default()
+            };
+            let previous_refs = manifest_referenced_versions(&previous);
+            let current_refs = manifest_referenced_versions(self);
+            for version in current_refs.difference(&previous_refs) {
+                let version_dir = builds.join("versions").join(version);
+                if !version_dir.is_dir() {
+                    anyhow::bail!(
+                        "cannot publish manifest reference to missing build version {version}"
+                    );
+                }
+            }
+            storage::write_json(&path, self)
+        })
     }
 
     /// Check if we should use stable or canary for a given session
@@ -163,6 +188,18 @@ impl BuildManifest {
     }
 }
 
+fn manifest_referenced_versions(manifest: &BuildManifest) -> HashSet<String> {
+    let mut versions = HashSet::new();
+    versions.extend(manifest.stable.clone());
+    versions.extend(manifest.canary.clone());
+    if let Some(pending) = &manifest.pending_activation {
+        versions.insert(pending.new_version.clone());
+        versions.extend(pending.previous_current_version.clone());
+        versions.extend(pending.previous_shared_server_version.clone());
+    }
+    versions
+}
+
 pub fn complete_pending_activation_for_session(session_id: &str) -> Result<Option<String>> {
     let mut manifest = BuildManifest::load()?;
     let Some(pending) = manifest.pending_activation.clone() else {
@@ -209,24 +246,195 @@ pub fn install_binary_at_version(source: &std::path::Path, version: &str) -> Res
         anyhow::bail!("Binary not found at {:?}", source);
     }
 
-    let dest_dir = builds_dir()?.join("versions").join(version);
-    storage::ensure_dir(&dest_dir)?;
+    let builds = builds_dir()?;
+    with_builds_retention_lock(&builds, || {
+        let dest_dir = builds.join("versions").join(version);
+        storage::ensure_dir(&dest_dir)?;
 
-    let dest = dest_dir.join(binary_name());
+        let dest = dest_dir.join(binary_name());
 
-    // Remove existing file first to avoid ETXTBSY when replacing a running binary.
-    if dest.exists() {
-        std::fs::remove_file(&dest)?;
+        // Remove existing file first to avoid ETXTBSY when replacing a running binary.
+        if dest.exists() {
+            std::fs::remove_file(&dest)?;
+        }
+
+        // Prefer hard link (instant, zero I/O) over copy (71MB+ binary).
+        // Falls back to copy if hard link fails (e.g. cross-filesystem).
+        if std::fs::hard_link(source, &dest).is_err() {
+            std::fs::copy(source, &dest)?;
+        }
+        crate::platform_support::set_permissions_executable(&dest)?;
+
+        Ok(dest)
+    })
+}
+
+pub fn protected_build_versions_in(builds: &Path) -> Result<HashSet<String>> {
+    let mut protected = HashSet::new();
+    for marker in [
+        "current-version",
+        "stable-version",
+        "shared-server-version",
+        "canary-version",
+    ] {
+        if let Ok(value) = std::fs::read_to_string(builds.join(marker)) {
+            let value = value.trim();
+            if !value.is_empty() {
+                protected.insert(value.to_string());
+            }
+        }
     }
-
-    // Prefer hard link (instant, zero I/O) over copy (71MB+ binary).
-    // Falls back to copy if hard link fails (e.g. cross-filesystem).
-    if std::fs::hard_link(source, &dest).is_err() {
-        std::fs::copy(source, &dest)?;
+    for channel in ["current", "stable", "shared-server", "canary"] {
+        let binary = builds.join(channel).join(binary_name());
+        if let Ok(target) = binary.canonicalize()
+            && let Some(version) = target
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+        {
+            protected.insert(version.to_string());
+        }
     }
-    crate::platform_support::set_permissions_executable(&dest)?;
+    if let Ok(exe) = std::env::current_exe()
+        && let Ok(exe) = exe.canonicalize()
+        && let Some(version) = exe
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+    {
+        protected.insert(version.to_string());
+    }
+    let manifest_path = builds.join("manifest.json");
+    if manifest_path.exists() {
+        let manifest: BuildManifest = storage::read_json(&manifest_path)?;
+        protected.extend(manifest.stable);
+        protected.extend(manifest.canary);
+        if let Some(pending) = manifest.pending_activation {
+            protected.insert(pending.new_version);
+            protected.extend(pending.previous_current_version);
+            protected.extend(pending.previous_shared_server_version);
+        }
+    }
+    Ok(protected)
+}
 
-    Ok(dest)
+fn prune_unreferenced_build_versions_in(
+    builds: &Path,
+    keep: usize,
+    min_age: Duration,
+    now: SystemTime,
+) -> Result<Vec<PathBuf>> {
+    let versions = builds.join("versions");
+    let entries = match std::fs::read_dir(&versions) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err.into()),
+    };
+    let protected = protected_build_versions_in(builds)?;
+    let mut candidates = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let path = entry.path();
+        let Some(version) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if protected.contains(version) {
+            continue;
+        }
+        let modified = entry
+            .metadata()?
+            .modified()
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        candidates.push((modified, path));
+    }
+    candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+
+    let mut removed = Vec::new();
+    for (modified, path) in candidates.into_iter().skip(keep) {
+        let Ok(age) = now.duration_since(modified) else {
+            continue;
+        };
+        if age < min_age {
+            continue;
+        }
+        let Some(version) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if protected_build_versions_in(builds)?.contains(version) {
+            continue;
+        }
+        std::fs::remove_dir_all(&path)?;
+        removed.push(path);
+    }
+    Ok(removed)
+}
+
+fn auto_prune_unreferenced_build_versions(builds: &Path) {
+    let _ = prune_unreferenced_build_versions_in(
+        builds,
+        AUTO_RETAIN_UNREFERENCED_BUILD_VERSIONS,
+        AUTO_PRUNE_BUILD_MIN_AGE,
+        SystemTime::now(),
+    );
+}
+
+pub fn with_builds_retention_lock<T>(
+    builds: &Path,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    storage::ensure_dir(builds)?;
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(builds.join("retention.lock"))?;
+    lock.lock_exclusive()?;
+    let result = operation();
+    let _ = FileExt::unlock(&lock);
+    result
+}
+
+pub fn remove_unreferenced_build_version_in(
+    builds: &Path,
+    version_dir: &Path,
+    min_age: Duration,
+) -> Result<bool> {
+    let versions = builds.join("versions");
+    if version_dir.parent() != Some(versions.as_path()) {
+        anyhow::bail!(
+            "build version must be a direct child of {}",
+            builds.join("versions").display()
+        );
+    }
+    let Some(version) = version_dir.file_name().and_then(|name| name.to_str()) else {
+        anyhow::bail!("build version path has no valid version name");
+    };
+    with_builds_retention_lock(builds, || {
+        if protected_build_versions_in(builds)?.contains(version) {
+            return Ok(false);
+        }
+        let metadata = match std::fs::symlink_metadata(version_dir) {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(err) => return Err(err.into()),
+        };
+        if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+            anyhow::bail!("build version candidate is not a directory");
+        }
+        let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+        if SystemTime::now()
+            .duration_since(modified)
+            .ok()
+            .is_none_or(|age| age < min_age)
+        {
+            return Ok(false);
+        }
+        std::fs::remove_dir_all(version_dir)?;
+        Ok(true)
+    })
 }
 
 fn binary_source_metadata_path(binary: &Path) -> PathBuf {
@@ -656,24 +864,36 @@ fn update_channel_symlink(channel: &str, version: &str) -> Result<PathBuf> {
 
 /// Update stable symlink to point to a version and publish stable-version marker.
 pub fn update_stable_symlink(version: &str) -> Result<PathBuf> {
-    let stable_link = update_channel_symlink("stable", version)?;
-    std::fs::write(stable_version_file()?, version)?;
-    Ok(stable_link)
+    let builds = builds_dir()?;
+    with_builds_retention_lock(&builds, || {
+        let stable_link = update_channel_symlink("stable", version)?;
+        std::fs::write(stable_version_file()?, version)?;
+        auto_prune_unreferenced_build_versions(&builds);
+        Ok(stable_link)
+    })
 }
 
 /// Update current symlink to point to a version and publish current-version marker.
 pub fn update_current_symlink(version: &str) -> Result<PathBuf> {
-    let current_link = update_channel_symlink("current", version)?;
-    std::fs::write(current_version_file()?, version)?;
-    Ok(current_link)
+    let builds = builds_dir()?;
+    with_builds_retention_lock(&builds, || {
+        let current_link = update_channel_symlink("current", version)?;
+        std::fs::write(current_version_file()?, version)?;
+        auto_prune_unreferenced_build_versions(&builds);
+        Ok(current_link)
+    })
 }
 
 /// Update the shared server symlink to point to a version and publish the
 /// shared-server-version marker.
 pub fn update_shared_server_symlink(version: &str) -> Result<PathBuf> {
-    let shared_link = update_channel_symlink("shared-server", version)?;
-    std::fs::write(shared_server_version_file()?, version)?;
-    Ok(shared_link)
+    let builds = builds_dir()?;
+    with_builds_retention_lock(&builds, || {
+        let shared_link = update_channel_symlink("shared-server", version)?;
+        std::fs::write(shared_server_version_file()?, version)?;
+        auto_prune_unreferenced_build_versions(&builds);
+        Ok(shared_link)
+    })
 }
 
 pub fn publish_local_current_build_for_source(
@@ -931,8 +1151,12 @@ pub fn install_version(repo_dir: &std::path::Path, hash: &str) -> Result<PathBuf
 
 /// Update canary symlink to point to a version
 pub fn update_canary_symlink(hash: &str) -> Result<()> {
-    let _ = update_channel_symlink("canary", hash)?;
-    Ok(())
+    let builds = builds_dir()?;
+    with_builds_retention_lock(&builds, || {
+        let _ = update_channel_symlink("canary", hash)?;
+        std::fs::write(builds.join("canary-version"), hash)?;
+        Ok(())
+    })
 }
 
 #[cfg(test)]

@@ -829,12 +829,14 @@ fn storage_cleanup_is_dry_run_by_default_and_parses_retention_options() {
                     apply,
                     keep_builds,
                     scratch_min_age_hours,
+                    include_clean_git,
                     json,
                 },
         }) => {
             assert!(!apply);
             assert_eq!(keep_builds, 5);
             assert_eq!(scratch_min_age_hours, 72);
+            assert!(!include_clean_git);
             assert!(json);
         }
         other => panic!("unexpected command: {:?}", other),

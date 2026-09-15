@@ -22,6 +22,146 @@ fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     result
 }
 
+fn create_version_fixture(builds: &Path, version: &str) {
+    let dir = builds.join("versions").join(version);
+    std::fs::create_dir_all(&dir).expect("create version dir");
+    std::fs::write(dir.join(binary_name()), version).expect("write version binary");
+}
+
+#[test]
+fn build_version_pruning_preserves_channels_and_pending_activation() {
+    with_temp_jcode_home(|| {
+        let builds = builds_dir().expect("builds dir");
+        for version in [
+            "stable",
+            "current",
+            "pending-new",
+            "pending-previous",
+            "stale",
+        ] {
+            create_version_fixture(&builds, version);
+        }
+        std::fs::write(builds.join("stable-version"), "stable").expect("stable marker");
+        std::fs::write(builds.join("current-version"), "current").expect("current marker");
+        BuildManifest {
+            pending_activation: Some(PendingActivation {
+                session_id: "session-test".to_string(),
+                new_version: "pending-new".to_string(),
+                previous_current_version: Some("pending-previous".to_string()),
+                previous_shared_server_version: None,
+                source_fingerprint: None,
+                requested_at: Utc::now(),
+            }),
+            ..BuildManifest::default()
+        }
+        .save()
+        .expect("save manifest");
+
+        let removed = prune_unreferenced_build_versions_in(
+            &builds,
+            0,
+            Duration::ZERO,
+            SystemTime::now() + Duration::from_secs(1),
+        )
+        .expect("prune versions");
+        assert_eq!(removed, vec![builds.join("versions/stale")]);
+        for protected in ["stable", "current", "pending-new", "pending-previous"] {
+            assert!(builds.join("versions").join(protected).exists());
+        }
+    });
+}
+
+#[test]
+fn build_version_pruning_keeps_newest_and_recent_versions() {
+    with_temp_jcode_home(|| {
+        let builds = builds_dir().expect("builds dir");
+        create_version_fixture(&builds, "older");
+        std::thread::sleep(Duration::from_millis(20));
+        create_version_fixture(&builds, "newest");
+
+        let recent = prune_unreferenced_build_versions_in(
+            &builds,
+            0,
+            Duration::from_secs(24 * 60 * 60),
+            SystemTime::now(),
+        )
+        .expect("preserve recent versions");
+        assert!(recent.is_empty());
+
+        let removed = prune_unreferenced_build_versions_in(
+            &builds,
+            1,
+            Duration::ZERO,
+            SystemTime::now() + Duration::from_secs(1),
+        )
+        .expect("retain newest version");
+        assert_eq!(removed, vec![builds.join("versions/older")]);
+        assert!(builds.join("versions/newest").exists());
+    });
+}
+
+#[test]
+fn build_version_removal_revalidates_channel_protection_under_lock() {
+    with_temp_jcode_home(|| {
+        let builds = builds_dir().expect("builds dir");
+        create_version_fixture(&builds, "became-current");
+        create_version_fixture(&builds, "unreferenced");
+        std::fs::write(builds.join("current-version"), "became-current").expect("current marker");
+
+        assert!(
+            !remove_unreferenced_build_version_in(
+                &builds,
+                &builds.join("versions/became-current"),
+                Duration::ZERO,
+            )
+            .expect("preserve current version")
+        );
+        assert!(builds.join("versions/became-current").exists());
+        assert!(
+            !remove_unreferenced_build_version_in(
+                &builds,
+                &builds.join("versions/unreferenced"),
+                Duration::from_secs(24 * 60 * 60),
+            )
+            .expect("preserve recent unreferenced version")
+        );
+        assert!(builds.join("versions/unreferenced").exists());
+        assert!(
+            remove_unreferenced_build_version_in(
+                &builds,
+                &builds.join("versions/unreferenced"),
+                Duration::ZERO,
+            )
+            .expect("remove unreferenced version")
+        );
+        assert!(!builds.join("versions/unreferenced").exists());
+    });
+}
+
+#[test]
+fn manifest_references_require_installed_versions_and_then_protect_them() {
+    with_temp_jcode_home(|| {
+        let builds = builds_dir().expect("builds dir");
+        let manifest = BuildManifest {
+            canary: Some("candidate".to_string()),
+            ..BuildManifest::default()
+        };
+        assert!(manifest.save().is_err());
+
+        create_version_fixture(&builds, "candidate");
+        manifest.save().expect("publish installed canary reference");
+        assert!(
+            !remove_unreferenced_build_version_in(
+                &builds,
+                &builds.join("versions/candidate"),
+                Duration::ZERO,
+            )
+            .expect("referenced version is preserved")
+        );
+        assert!(builds.join("versions/candidate").exists());
+    });
+}
+
 fn create_git_repo_fixture() -> tempfile::TempDir {
     let temp = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir_all(temp.path().join(".git")).expect("create .git dir");
@@ -282,6 +422,10 @@ fn pending_activation_can_complete_and_roll_back() {
             .expect("install previous version");
         install_binary_at_version(std::env::current_exe().as_ref().unwrap(), shared_version)
             .expect("install previous shared version");
+        install_binary_at_version(std::env::current_exe().as_ref().unwrap(), "canary-next")
+            .expect("install next canary version");
+        install_binary_at_version(std::env::current_exe().as_ref().unwrap(), "canary-bad")
+            .expect("install rollback canary version");
         update_current_symlink(current_version).expect("publish previous current");
         update_shared_server_symlink(shared_version).expect("publish previous shared");
 
