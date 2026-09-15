@@ -403,6 +403,14 @@ pub fn load_access_token_from_env_or_file() -> Result<CursorDirectTokens> {
         }
     }
 
+    if let Some(tokens) = crate::auth::external::load_cursor_oauth_tokens() {
+        return Ok(CursorDirectTokens {
+            access_token: tokens.access_token,
+            refresh_token: Some(tokens.refresh_token),
+            source: "opencodex_auth",
+        });
+    }
+
     anyhow::bail!(
         "Cursor direct access token not found. Set CURSOR_ACCESS_TOKEN, log in with Cursor, or configure CURSOR_API_KEY."
     )

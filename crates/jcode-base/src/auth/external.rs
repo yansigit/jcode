@@ -270,6 +270,16 @@ pub fn load_anthropic_oauth_tokens() -> Option<ExternalOAuthTokens> {
     load_oauth_tokens_for_candidates(&["anthropic", "claude"])
 }
 
+/// Load the active Cursor OAuth account imported from Open-Codex.
+pub fn load_cursor_oauth_tokens() -> Option<ExternalOAuthTokens> {
+    let source = ExternalAuthSource::OpenCode;
+    if !source_allowed(source) {
+        return None;
+    }
+    let entry = load_auth_map(source).ok()?.remove("cursor")?;
+    extract_oauth_tokens(source, &entry)
+}
+
 pub fn source_allowed(source: ExternalAuthSource) -> bool {
     let Ok(path) = source.path() else {
         return false;
