@@ -134,10 +134,10 @@ impl App {
                         provider.display_name,
                         format!("Imported account `{}`", account.label),
                         format!("{state} · Open-Codex import · id {}", account.account_id),
-                        AccountPickerCommand::SubmitInput(format!(
-                            "/account {} settings",
-                            provider.id
-                        )),
+                        AccountPickerCommand::SwitchProvider {
+                            provider_id: provider.id.to_string(),
+                            label: account.account_id,
+                        },
                     ));
                 }
                 break;

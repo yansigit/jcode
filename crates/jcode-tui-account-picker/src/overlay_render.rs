@@ -48,7 +48,9 @@ pub(super) fn action_section(item: &AccountPickerItem) -> ActionSection {
     match &item.command {
         AccountPickerCommand::OpenAccountCenter { .. } => ActionSection::Overview,
         AccountPickerCommand::OpenAddReplaceFlow { .. } => ActionSection::Add,
-        AccountPickerCommand::Switch { .. } => ActionSection::Switch,
+        AccountPickerCommand::Switch { .. } | AccountPickerCommand::SwitchProvider { .. } => {
+            ActionSection::Switch
+        }
         AccountPickerCommand::Login { .. } => ActionSection::Login,
         AccountPickerCommand::Remove { .. } => ActionSection::Remove,
         AccountPickerCommand::PromptNew { .. } => ActionSection::Add,
@@ -181,7 +183,7 @@ pub(super) fn action_kind_help(command: &AccountPickerCommand) -> &'static str {
         AccountPickerCommand::PromptValue { .. } => {
             "Prompts for a new value, then saves the matching provider or global setting."
         }
-        AccountPickerCommand::Switch { .. } => {
+        AccountPickerCommand::Switch { .. } | AccountPickerCommand::SwitchProvider { .. } => {
             "Switches the active saved account for this provider."
         }
         AccountPickerCommand::Login { .. } => {
@@ -222,6 +224,9 @@ pub(super) fn command_preview(command: &AccountPickerCommand) -> String {
             AccountProviderKind::Anthropic => format!("/account switch {}", label),
             AccountProviderKind::OpenAi => format!("/account openai switch {}", label),
         },
+        AccountPickerCommand::SwitchProvider { provider_id, label } => {
+            format!("/account {} switch {}", provider_id, label)
+        }
         AccountPickerCommand::Login { provider, label } => match provider {
             AccountProviderKind::Anthropic => format!("/account claude add {}", label),
             AccountProviderKind::OpenAi => format!("/account openai add {}", label),

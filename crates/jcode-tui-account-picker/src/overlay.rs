@@ -853,6 +853,7 @@ fn estimate_command_bytes(command: &AccountPickerCommand) -> usize {
                 + status_notice.capacity()
         }
         AccountPickerCommand::Switch { label, .. }
+        | AccountPickerCommand::SwitchProvider { label, .. }
         | AccountPickerCommand::Login { label, .. }
         | AccountPickerCommand::Remove { label, .. } => label.capacity(),
         AccountPickerCommand::PromptNew { .. } => 0,
@@ -1070,6 +1071,29 @@ mod tests {
 
         assert!(preview.contains("/account default-model <value>"));
         assert!(preview.contains("clear"));
+    }
+
+    #[test]
+    fn provider_neutral_switch_preview_uses_provider_and_account_id() {
+        let command = AccountPickerCommand::SwitchProvider {
+            provider_id: "antigravity".to_string(),
+            label: "account-id-2".to_string(),
+        };
+
+        assert_eq!(
+            command_preview(&command),
+            "/account antigravity switch account-id-2"
+        );
+        assert_eq!(
+            action_section(&AccountPickerItem::action(
+                "antigravity",
+                "Antigravity",
+                "Imported account `work`",
+                "ready",
+                command,
+            )),
+            ActionSection::Switch
+        );
     }
 
     #[test]

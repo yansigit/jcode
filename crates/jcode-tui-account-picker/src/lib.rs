@@ -25,6 +25,10 @@ pub enum AccountPickerCommand {
         provider: AccountProviderKind,
         label: String,
     },
+    SwitchProvider {
+        provider_id: String,
+        label: String,
+    },
     Login {
         provider: AccountProviderKind,
         label: String,
@@ -97,7 +101,9 @@ pub fn action_kind_label(command: &AccountPickerCommand) -> &'static str {
         AccountPickerCommand::SubmitInput(input) if input.contains(" add") => "account",
         AccountPickerCommand::SubmitInput(input) if input.contains(" switch ") => "account",
         AccountPickerCommand::PromptValue { .. } => "setting",
-        AccountPickerCommand::Switch { .. } => "account",
+        AccountPickerCommand::Switch { .. } | AccountPickerCommand::SwitchProvider { .. } => {
+            "account"
+        }
         AccountPickerCommand::Login { .. } => "login",
         AccountPickerCommand::Remove { .. } => "danger",
         AccountPickerCommand::PromptNew { .. } => "account",

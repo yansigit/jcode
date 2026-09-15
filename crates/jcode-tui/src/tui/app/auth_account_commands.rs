@@ -352,6 +352,12 @@ pub(crate) fn account_command_from_picker(
             provider_id: provider_id(provider),
             label: label.clone(),
         }),
+        AccountPickerCommand::SwitchProvider { provider_id, label } => {
+            Some(AccountCommand::Switch {
+                provider_id: provider_id.clone(),
+                label: label.clone(),
+            })
+        }
         AccountPickerCommand::Login { provider, label } => Some(AccountCommand::Add {
             provider_id: provider_id(provider),
             label: Some(label.clone()),
@@ -1219,5 +1225,21 @@ mod tests {
         assert!(markdown.contains("Next steps"));
         assert!(markdown.contains("jcode login --provider openai"));
         assert!(markdown.contains("Review current state: jcode auth status --json"));
+    }
+
+    #[test]
+    fn provider_neutral_picker_switch_maps_without_string_reparsing() {
+        let command = crate::tui::account_picker::AccountPickerCommand::SwitchProvider {
+            provider_id: "cursor".to_string(),
+            label: "cursor-account-2".to_string(),
+        };
+
+        match account_command_from_picker(&command) {
+            Some(AccountCommand::Switch { provider_id, label }) => {
+                assert_eq!(provider_id, "cursor");
+                assert_eq!(label, "cursor-account-2");
+            }
+            other => panic!("unexpected picker command mapping: {other:?}"),
+        }
     }
 }
