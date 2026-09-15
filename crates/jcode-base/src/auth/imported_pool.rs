@@ -1,7 +1,16 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::{LazyLock, Mutex};
+use std::time::Duration;
+
+const DEFAULT_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(60);
+const DEFAULT_AUTH_COOLDOWN: Duration = Duration::from_secs(300);
+const DEFAULT_OTHER_COOLDOWN: Duration = Duration::from_secs(30);
+const MAX_FAILURE_BACKOFF: Duration = Duration::from_secs(30 * 60);
+const MAX_ERROR_KIND_CHARS: usize = 32;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ImportedAccount {
@@ -16,10 +25,282 @@ pub struct ImportedAccount {
     pub active: bool,
 }
 
+/// Runtime health for an imported account.
+///
+/// This is deliberately persisted separately from [`ImportedAccount`]. Account
+/// credentials are imported snapshots and must not be rewritten every time a
+/// provider rejects a request. The state file contains no access or refresh
+/// tokens, and failures are reduced to a closed vocabulary rather than storing
+/// provider response bodies (which can contain credentials).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImportedAccountRuntimeState {
+    #[serde(default)]
+    pub cooldown_until_ms: Option<i64>,
+    #[serde(default)]
+    pub consecutive_failures: u32,
+    #[serde(default)]
+    pub last_failure_kind: Option<String>,
+    #[serde(default)]
+    pub last_failure_at_ms: Option<i64>,
+    #[serde(default)]
+    pub last_success_at_ms: Option<i64>,
+    #[serde(default)]
+    pub last_selected_at_ms: Option<i64>,
+}
+
 fn path() -> Result<PathBuf> {
     Ok(crate::storage::app_config_dir()?
         .join("imported_auth")
         .join("account_pools.json"))
+}
+
+fn runtime_state_path() -> Result<PathBuf> {
+    Ok(crate::storage::app_config_dir()?
+        .join("imported_auth")
+        .join("account_pool_state.json"))
+}
+
+// Account rotation can be triggered by more than one request task. Serialize
+// read-modify-write operations so two failures cannot overwrite each other's
+// cooldown or selection updates.
+static RUNTIME_STATE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+fn runtime_state_key(provider: &str, account_id: &str) -> String {
+    format!("{provider}\n{account_id}")
+}
+
+fn load_runtime_states() -> BTreeMap<String, ImportedAccountRuntimeState> {
+    let Ok(path) = runtime_state_path() else {
+        return BTreeMap::new();
+    };
+    crate::storage::read_json(&path).unwrap_or_default()
+}
+
+fn save_runtime_states(states: &BTreeMap<String, ImportedAccountRuntimeState>) -> Result<()> {
+    crate::storage::write_json(&runtime_state_path()?, states)
+}
+
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+fn cooldown_active(state: &ImportedAccountRuntimeState, now_ms: i64) -> bool {
+    state.cooldown_until_ms.is_some_and(|until| until > now_ms)
+}
+
+fn failure_kind(error: &str) -> &'static str {
+    let lower = error.to_ascii_lowercase();
+    if [
+        "unauthorized",
+        "unauthorised",
+        "authentication",
+        "not logged in",
+        "not_login",
+        "invalid token",
+        "token expired",
+        "access denied",
+        "forbidden",
+        "401",
+        "403",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+    {
+        "authentication"
+    } else if [
+        "rate limit",
+        "rate_limit",
+        "rate-limit",
+        "too many requests",
+        "resource exhausted",
+        "quota",
+        "429",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+    {
+        "rate_limited"
+    } else {
+        "other"
+    }
+}
+
+fn cooldown_for(kind: &str, failures: u32) -> Duration {
+    let base = match kind {
+        "authentication" => DEFAULT_AUTH_COOLDOWN,
+        "rate_limited" => DEFAULT_RATE_LIMIT_COOLDOWN,
+        _ => DEFAULT_OTHER_COOLDOWN,
+    };
+    let multiplier = 1u32
+        .checked_shl(failures.saturating_sub(1).min(10))
+        .unwrap_or(u32::MAX);
+    base.checked_mul(multiplier)
+        .unwrap_or(MAX_FAILURE_BACKOFF)
+        .min(MAX_FAILURE_BACKOFF)
+}
+
+/// Return the persisted runtime state for one imported account, if present.
+pub fn runtime_state(provider: &str, account_id: &str) -> Option<ImportedAccountRuntimeState> {
+    load_runtime_states()
+        .get(&runtime_state_key(provider, account_id))
+        .cloned()
+}
+
+/// Return the next account that is not cooling down, excluding the failed or
+/// currently-used account when requested. Least-recently-selected accounts win
+/// so concurrent turns do not repeatedly choose the first alternate.
+pub fn next_eligible_account(
+    provider: &str,
+    exclude_account_id: Option<&str>,
+) -> Option<ImportedAccount> {
+    let now = now_ms();
+    let states = load_runtime_states();
+    list_provider(provider)
+        .into_iter()
+        .enumerate()
+        .filter(|(_, account)| {
+            exclude_account_id != Some(account.account_id.as_str())
+                && !cooldown_active(
+                    states
+                        .get(&runtime_state_key(provider, &account.account_id))
+                        .unwrap_or(&ImportedAccountRuntimeState::default()),
+                    now,
+                )
+        })
+        .min_by_key(|(index, account)| {
+            (
+                states
+                    .get(&runtime_state_key(provider, &account.account_id))
+                    .and_then(|state| state.last_selected_at_ms)
+                    .unwrap_or_default(),
+                *index,
+            )
+        })
+        .map(|(_, account)| account)
+}
+
+/// Prefer the explicitly active imported account when it is healthy; otherwise
+/// return the least-recently-selected account outside its cooldown. This keeps
+/// manual account switches authoritative while preventing a persisted failure
+/// from pinning every later request to the same account.
+pub fn active_or_next_eligible_account(provider: &str) -> Option<ImportedAccount> {
+    let now = now_ms();
+    let states = load_runtime_states();
+    let accounts = list_provider(provider);
+    if let Some(account) = accounts.iter().find(|account| {
+        account.active
+            && !cooldown_active(
+                states
+                    .get(&runtime_state_key(provider, &account.account_id))
+                    .unwrap_or(&ImportedAccountRuntimeState::default()),
+                now,
+            )
+    }) {
+        return Some(account.clone());
+    }
+    next_eligible_account(provider, None)
+}
+
+/// Record a provider failure without persisting the provider's error body.
+/// Returns the updated state so callers can include safe status in their own
+/// control flow without ever handling or logging a token.
+pub fn record_failure(
+    provider: &str,
+    account_id: &str,
+    error: &str,
+) -> Result<ImportedAccountRuntimeState> {
+    let _guard = RUNTIME_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut states = load_runtime_states();
+    let key = runtime_state_key(provider, account_id);
+    let mut state = states.remove(&key).unwrap_or_default();
+    state.consecutive_failures = state.consecutive_failures.saturating_add(1);
+    let kind = failure_kind(error);
+    let cooldown = cooldown_for(kind, state.consecutive_failures);
+    let now = now_ms();
+    state.cooldown_until_ms = Some(now.saturating_add(cooldown.as_millis() as i64));
+    state.last_failure_kind = Some(kind.chars().take(MAX_ERROR_KIND_CHARS).collect());
+    state.last_failure_at_ms = Some(now);
+    states.insert(key, state.clone());
+    save_runtime_states(&states)?;
+    Ok(state)
+}
+
+/// Clear a failed account's cooldown after a successful request.
+pub fn record_success(provider: &str, account_id: &str) -> Result<()> {
+    let _guard = RUNTIME_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut states = load_runtime_states();
+    let key = runtime_state_key(provider, account_id);
+    let mut state = states.remove(&key).unwrap_or_default();
+    state.cooldown_until_ms = None;
+    state.consecutive_failures = 0;
+    state.last_failure_kind = None;
+    state.last_success_at_ms = Some(now_ms());
+    states.insert(key, state);
+    save_runtime_states(&states)
+}
+
+/// Mark an account failed and atomically select and activate the next eligible
+/// imported account. The selected account is left active so a successful retry
+/// naturally becomes the account used by subsequent requests.
+pub fn rotate_to_next_account(
+    provider: &str,
+    failed_account_id: &str,
+    error: &str,
+) -> Result<Option<ImportedAccount>> {
+    let _guard = RUNTIME_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut states = load_runtime_states();
+    let key = runtime_state_key(provider, failed_account_id);
+    let mut failed = states.remove(&key).unwrap_or_default();
+    failed.consecutive_failures = failed.consecutive_failures.saturating_add(1);
+    let kind = failure_kind(error);
+    let now = now_ms();
+    failed.cooldown_until_ms = Some(
+        now.saturating_add(cooldown_for(kind, failed.consecutive_failures).as_millis() as i64),
+    );
+    failed.last_failure_kind = Some(kind.to_string());
+    failed.last_failure_at_ms = Some(now);
+    states.insert(key, failed);
+
+    let next = list_provider(provider)
+        .into_iter()
+        .enumerate()
+        .filter(|(_, account)| account.account_id != failed_account_id)
+        .filter(|(_, account)| {
+            !cooldown_active(
+                states
+                    .get(&runtime_state_key(provider, &account.account_id))
+                    .unwrap_or(&ImportedAccountRuntimeState::default()),
+                now,
+            )
+        })
+        .min_by_key(|(index, account)| {
+            (
+                states
+                    .get(&runtime_state_key(provider, &account.account_id))
+                    .and_then(|state| state.last_selected_at_ms)
+                    .unwrap_or_default(),
+                *index,
+            )
+        })
+        .map(|(_, account)| account);
+
+    if let Some(account) = &next {
+        let selected_key = runtime_state_key(provider, &account.account_id);
+        let selected = states.entry(selected_key).or_default();
+        selected.last_selected_at_ms = Some(now);
+        // Keep the active-account update in the same serialized critical
+        // section as the state update. `set_active` rereads the credential
+        // snapshot but does not expose its token in errors or logs.
+        set_active_unlocked(provider, &account.account_id)?;
+    }
+    save_runtime_states(&states)?;
+    Ok(next)
 }
 
 pub fn import_opencodex_accounts(value: &Value) -> Result<Vec<ImportedAccount>> {
@@ -107,7 +388,7 @@ pub fn list_provider(provider: &str) -> Vec<ImportedAccount> {
         .collect()
 }
 
-pub fn set_active(provider: &str, label: &str) -> Result<()> {
+fn set_active_unlocked(provider: &str, label: &str) -> Result<()> {
     let target = path()?;
     let mut accounts: Vec<ImportedAccount> = crate::storage::read_json(&target)?;
     let mut found = false;
@@ -124,10 +405,18 @@ pub fn set_active(provider: &str, label: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn set_active(provider: &str, label: &str) -> Result<()> {
+    let _guard = RUNTIME_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    set_active_unlocked(provider, label)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    use tempfile::tempdir;
 
     #[test]
     fn imports_every_nested_provider_account() {
@@ -156,5 +445,79 @@ mod tests {
         let accounts = import_opencodex_accounts(&value).unwrap();
         assert_eq!(accounts.len(), 1);
         assert_eq!(accounts[0].account_id, "valid");
+    }
+
+    #[test]
+    fn failure_classification_and_backoff_are_provider_neutral() {
+        assert_eq!(failure_kind("HTTP 401 unauthorized"), "authentication");
+        assert_eq!(failure_kind("HTTP 429 resource exhausted"), "rate_limited");
+        assert_eq!(failure_kind("connection reset"), "other");
+        assert_eq!(cooldown_for("rate_limited", 1), DEFAULT_RATE_LIMIT_COOLDOWN);
+        assert_eq!(cooldown_for("authentication", 2), Duration::from_secs(600));
+        assert_eq!(cooldown_for("authentication", 99), MAX_FAILURE_BACKOFF);
+    }
+
+    #[test]
+    fn persists_failure_state_without_credentials_and_rotates_eligible_account() {
+        let _env_lock = crate::storage::lock_test_env();
+        let temp = tempdir().unwrap();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+
+        let value = json!({
+            "cursor": {"activeAccountId": "cursor-a", "accounts": [
+                {"id": "cursor-a", "alias": "first", "credential": {"access": "access-secret-a", "refresh": "refresh-secret-a"}},
+                {"id": "cursor-b", "alias": "second", "credential": {"access": "access-secret-b", "refresh": "refresh-secret-b"}}
+            ]}
+        });
+        import_opencodex_accounts(&value).unwrap();
+
+        let state = record_failure(
+            "cursor",
+            "cursor-a",
+            "HTTP 401 unauthorized bearer access-secret-a",
+        )
+        .unwrap();
+        assert_eq!(state.last_failure_kind.as_deref(), Some("authentication"));
+        assert!(state.cooldown_until_ms.unwrap() > now_ms());
+        assert_eq!(
+            next_eligible_account("cursor", Some("cursor-a"))
+                .unwrap()
+                .account_id,
+            "cursor-b"
+        );
+        assert_eq!(
+            active_or_next_eligible_account("cursor")
+                .unwrap()
+                .account_id,
+            "cursor-b"
+        );
+
+        let state_path = runtime_state_path().unwrap();
+        let raw_state = std::fs::read_to_string(state_path).unwrap();
+        assert!(!raw_state.contains("access-secret-a"));
+        assert!(!raw_state.contains("refresh-secret-a"));
+
+        record_success("cursor", "cursor-a").unwrap();
+        assert!(runtime_state("cursor", "cursor-a")
+            .unwrap()
+            .cooldown_until_ms
+            .is_none());
+        set_active("cursor", "first").unwrap();
+        assert_eq!(
+            rotate_to_next_account("cursor", "cursor-a", "HTTP 429 rate limit")
+                .unwrap()
+                .unwrap()
+                .account_id,
+            "cursor-b"
+        );
+        assert!(list_provider("cursor")
+            .iter()
+            .any(|account| account.account_id == "cursor-b" && account.active));
+
+        match previous_home {
+            Some(value) => crate::env::set_var("JCODE_HOME", value),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
     }
 }
