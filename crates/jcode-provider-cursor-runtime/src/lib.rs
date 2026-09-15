@@ -726,7 +726,7 @@ async fn run_native_text_command(
     tx: mpsc::Sender<Result<StreamEvent>>,
     prompt: &str,
     model: &str,
-    _account_label: Option<&str>,
+    account_label: Option<&str>,
     resume_session_id: Option<&str>,
     stream_uuid: &str,
     tools: &[ToolDefinition],
