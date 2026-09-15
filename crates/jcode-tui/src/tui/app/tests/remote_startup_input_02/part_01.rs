@@ -58,15 +58,16 @@ fn test_model_picker_cursor_models_have_cursor_route() {
     let composer_entry = picker
         .entries
         .iter()
-        .find(|m| m.name == "composer-2-fast")
-        .expect("composer-2-fast should be in picker");
+        .find(|m| m.name == "composer-2")
+        .expect("composer-2 family should be in picker");
 
     assert!(
         composer_entry
             .options
             .iter()
-            .any(|r| r.api_method == "cursor"),
-        "composer-2-fast should have a cursor route, got: {:?}",
+            .any(|r| r.api_method == "cursor"
+                && r.model.as_deref() == Some("composer-2-fast")),
+        "composer-2 family should contain the exact fast Cursor route, got: {:?}",
         composer_entry.options
     );
 }
@@ -86,17 +87,30 @@ fn test_model_picker_cursor_selection_prefixes_model() {
     let composer_idx = picker
         .entries
         .iter()
-        .position(|m| m.name == "composer-2-fast")
-        .expect("composer-2-fast should be in picker");
+        .position(|m| m.name == "composer-2")
+        .expect("composer-2 family should be in picker");
 
     let filtered_pos = picker
         .filtered
         .iter()
         .position(|&i| i == composer_idx)
-        .expect("composer-2-fast should be in filtered list");
+        .expect("composer-2 family should be in filtered list");
 
-    app.inline_interactive_state.as_mut().unwrap().selected = filtered_pos;
+    let picker = app.inline_interactive_state.as_mut().unwrap();
+    picker.selected = filtered_pos;
+    let entry = &mut picker.entries[composer_idx];
+    entry.selected_option = entry
+        .options
+        .iter()
+        .position(|route| route.model.as_deref() == Some("composer-2-fast"))
+        .expect("composer-2 family should expose its exact fast wire route");
 
+    // Model families with multiple variants use the normal three-column
+    // picker flow: family -> variant/provider -> method/confirm.
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+        .unwrap();
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+        .unwrap();
     app.handle_key(KeyCode::Enter, KeyModifiers::empty())
         .unwrap();
 
