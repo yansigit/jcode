@@ -1,6 +1,7 @@
 use super::handle_get_history;
 use super::handle_get_model_catalog;
 use super::session_activity_snapshot;
+use super::should_skip_attach_model_prefetch;
 use crate::agent::Agent;
 use crate::message::{Message, ToolDefinition};
 use crate::provider::{EventStream, Provider};
@@ -14,6 +15,14 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::io::AsyncReadExt;
 use tokio::sync::{Mutex, RwLock, mpsc};
+
+#[test]
+fn cursor_static_fallback_does_not_suppress_attach_prefetch() {
+    let models = vec!["composer-2.5".to_string()];
+    assert!(!should_skip_attach_model_prefetch("cursor", &models));
+    assert!(should_skip_attach_model_prefetch("openai", &models));
+    assert!(!should_skip_attach_model_prefetch("cursor", &[]));
+}
 
 struct MockProvider(Option<&'static str>);
 
