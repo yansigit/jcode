@@ -20,6 +20,56 @@ fn test_usage_percent_format() {
 }
 
 #[test]
+fn cursor_current_period_usage_maps_to_account_quota() {
+    let payload = serde_json::json!({
+        "billingCycleEnd": 1_800_000_000_000_i64,
+        "enabled": true,
+        "displayMessage": "Cursor Pro",
+        "planUsage": {
+            "totalSpend": 1250,
+            "remaining": 3750,
+            "limit": 5000,
+            "totalPercentUsed": 25,
+            "autoPercentUsed": 10,
+            "apiPercentUsed": 40
+        }
+    });
+
+    let report = super::provider_fetch::cursor_usage_report_from_payload(
+        "Cursor GSG01".to_string(),
+        "cursor-account-1".to_string(),
+        &payload,
+    );
+
+    assert_eq!(report.provider_name, "Cursor GSG01");
+    assert_eq!(report.limits.len(), 3);
+    assert_eq!(report.limits[0].name, "Billing cycle");
+    assert_eq!(report.limits[0].usage_percent, 25.0);
+    assert!(report.limits[0].resets_at.is_some());
+    assert!(
+        report
+            .extra_info
+            .contains(&("Account ID".to_string(), "cursor-account-1".to_string()))
+    );
+    assert!(
+        report
+            .extra_info
+            .contains(&("Used".to_string(), "$12.50".to_string()))
+    );
+    assert!(
+        report
+            .extra_info
+            .contains(&("Remaining".to_string(), "$37.50".to_string()))
+    );
+    assert!(
+        report
+            .extra_info
+            .contains(&("Included limit".to_string(), "$50.00".to_string()))
+    );
+    assert!(!report.hard_limit_reached);
+}
+
+#[test]
 fn test_humanize_key() {
     assert_eq!(humanize_key("five_hour"), "Five Hour");
     assert_eq!(humanize_key("seven_day_opus"), "Seven Day Opus");

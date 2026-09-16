@@ -1111,6 +1111,7 @@ impl App {
 
     pub(super) fn handle_usage_report(&mut self, results: Vec<crate::usage::ProviderUsage>) {
         self.usage_report_refreshing = false;
+        self.update_account_center_usage(&results);
         self.clear_usage_transient_ui();
         self.upsert_usage_display_card(Self::format_usage_display_card(
             &results,
@@ -1131,6 +1132,7 @@ impl App {
         progress: crate::usage::ProviderUsageProgress,
     ) {
         self.usage_report_refreshing = !progress.done;
+        self.update_account_center_usage(&progress.results);
         self.clear_usage_transient_ui();
         self.upsert_usage_display_card(Self::format_usage_display_card(
             &progress.results,

@@ -498,6 +498,166 @@ pub(super) async fn fetch_gemini_usage_report() -> Option<ProviderUsage> {
     })
 }
 
+const CURSOR_CURRENT_PERIOD_USAGE_URL: &str =
+    "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage";
+
+fn cursor_json_number(value: Option<&serde_json::Value>) -> Option<f64> {
+    value.and_then(|value| {
+        value
+            .as_f64()
+            .or_else(|| value.as_str().and_then(|raw| raw.parse::<f64>().ok()))
+    })
+}
+
+fn cursor_reset_timestamp(value: Option<&serde_json::Value>) -> Option<String> {
+    let raw = cursor_json_number(value)? as i64;
+    let reset = if raw.abs() >= 1_000_000_000_000 {
+        chrono::DateTime::<chrono::Utc>::from_timestamp_millis(raw)
+    } else {
+        chrono::DateTime::<chrono::Utc>::from_timestamp(raw, 0)
+    }?;
+    Some(reset.to_rfc3339())
+}
+
+fn cursor_money(cents: f64) -> String {
+    format!("${:.2}", cents / 100.0)
+}
+
+fn cursor_usage_percent(plan_usage: &serde_json::Value) -> Option<f32> {
+    cursor_json_number(plan_usage.get("totalPercentUsed"))
+        .or_else(|| {
+            let limit = cursor_json_number(plan_usage.get("limit"))?;
+            let remaining = cursor_json_number(plan_usage.get("remaining"))?;
+            (limit > 0.0).then_some(((limit - remaining).max(0.0) / limit) * 100.0)
+        })
+        .map(|value| value.clamp(0.0, 100.0) as f32)
+}
+
+pub(super) fn cursor_usage_report_from_payload(
+    display_name: String,
+    account_id: String,
+    payload: &serde_json::Value,
+) -> ProviderUsage {
+    let mut limits = Vec::new();
+    let mut extra_info = vec![("Account ID".to_string(), account_id)];
+    let resets_at = cursor_reset_timestamp(payload.get("billingCycleEnd"));
+
+    if let Some(plan_usage) = payload.get("planUsage") {
+        if let Some(usage_percent) = cursor_usage_percent(plan_usage) {
+            limits.push(UsageLimit {
+                name: "Billing cycle".to_string(),
+                usage_percent,
+                resets_at: resets_at.clone(),
+            });
+        }
+        for (field, name) in [("autoPercentUsed", "Auto"), ("apiPercentUsed", "API")] {
+            if let Some(usage_percent) = cursor_json_number(plan_usage.get(field)) {
+                limits.push(UsageLimit {
+                    name: name.to_string(),
+                    usage_percent: usage_percent.clamp(0.0, 100.0) as f32,
+                    resets_at: resets_at.clone(),
+                });
+            }
+        }
+
+        if let Some(total_spend) = cursor_json_number(plan_usage.get("totalSpend")) {
+            extra_info.push(("Used".to_string(), cursor_money(total_spend)));
+        }
+        if let Some(remaining) = cursor_json_number(plan_usage.get("remaining")) {
+            extra_info.push(("Remaining".to_string(), cursor_money(remaining)));
+        }
+        if let Some(limit) = cursor_json_number(plan_usage.get("limit")) {
+            extra_info.push(("Included limit".to_string(), cursor_money(limit)));
+        }
+    }
+
+    if payload.get("enabled").and_then(|value| value.as_bool()) == Some(false) {
+        extra_info.push((
+            "Subscription".to_string(),
+            "no active Cursor usage plan".to_string(),
+        ));
+    }
+    if let Some(message) = payload
+        .get("displayMessage")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+    {
+        extra_info.push(("Plan".to_string(), message.to_string()));
+    }
+
+    ProviderUsage {
+        provider_name: display_name,
+        limits,
+        extra_info,
+        hard_limit_reached: cursor_usage_percent(
+            payload.get("planUsage").unwrap_or(&serde_json::Value::Null),
+        )
+        .is_some_and(|percent| percent >= 100.0),
+        error: None,
+        last_used_unix_secs: None,
+    }
+}
+
+async fn request_cursor_current_period_usage(
+    client: &reqwest::Client,
+    access_token: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let response = client
+        .post(CURSOR_CURRENT_PERIOD_USAGE_URL)
+        .bearer_auth(access_token)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .header("Connect-Protocol-Version", "1")
+        .body("{}")
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = crate::util::http_error_body(response, "HTTP error").await;
+        anyhow::bail!("Cursor usage API failed ({}): {}", status, body.trim());
+    }
+    response
+        .json()
+        .await
+        .context("Failed to decode Cursor usage response")
+}
+
+pub(super) async fn fetch_cursor_usage_for_account(
+    account: auth::imported_pool::ImportedAccount,
+) -> ProviderUsage {
+    let display_name = format!("Cursor {}", account.label);
+    let account_id = account.account_id.clone();
+    let client = crate::provider::shared_http_client();
+    let mut tokens = auth::cursor::CursorDirectTokens {
+        access_token: account.access_token,
+        refresh_token: account.refresh_token,
+        source: "opencodex_auth",
+        account_id: Some(account_id.clone()),
+    };
+
+    let mut result = request_cursor_current_period_usage(&client, &tokens.access_token).await;
+    if result
+        .as_ref()
+        .err()
+        .is_some_and(|error| error.to_string().contains("401") || error.to_string().contains("403"))
+        && tokens.refresh_token.is_some()
+        && let Ok(refreshed) = auth::cursor::refresh_resolved_tokens(&client, &tokens).await
+    {
+        tokens = refreshed;
+        result = request_cursor_current_period_usage(&client, &tokens.access_token).await;
+    }
+
+    match result {
+        Ok(payload) => cursor_usage_report_from_payload(display_name, account_id, &payload),
+        Err(error) => ProviderUsage {
+            provider_name: display_name,
+            extra_info: vec![("Account ID".to_string(), account_id)],
+            error: Some(error.to_string()),
+            ..Default::default()
+        },
+    }
+}
+
 /// Cursor API-key report. Cursor's admin/usage API requires a paid plan; for
 /// free keys the `/v0/me` error body still tells us the key is live and which
 /// plan tier it is on, so we surface that.

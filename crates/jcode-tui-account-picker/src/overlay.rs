@@ -95,6 +95,34 @@ impl AccountPicker {
         picker
     }
 
+    pub fn update_switch_provider_item(
+        &mut self,
+        provider_id: &str,
+        source_provider: &str,
+        account_id: &str,
+        subtitle: String,
+        details: Vec<(String, String)>,
+    ) -> bool {
+        let Some(item) = self.items.iter_mut().find(|item| {
+            matches!(
+                &item.command,
+                AccountPickerCommand::SwitchProvider {
+                    provider_id: item_provider_id,
+                    source_provider: item_source_provider,
+                    label,
+                } if item_provider_id == provider_id
+                    && item_source_provider == source_provider
+                    && label == account_id
+            )
+        }) else {
+            return false;
+        };
+        item.subtitle = subtitle;
+        item.details = details;
+        self.apply_filter();
+        true
+    }
+
     fn selected_item(&self) -> Option<&AccountPickerItem> {
         self.filtered
             .get(self.selected)
@@ -965,6 +993,59 @@ mod tests {
             matches!(picker.handle_overlay_key(KeyCode::Enter, KeyModifiers::empty()).unwrap(),
             OverlayAction::Execute(AccountPickerCommand::SubmitInput(command)) if command == "/account openai switch openai-otter")
         );
+    }
+
+    #[test]
+    fn imported_account_quota_update_preserves_switch_action() {
+        let command = AccountPickerCommand::SwitchProvider {
+            provider_id: "cursor".into(),
+            source_provider: "cursor".into(),
+            label: "cursor-account-1".into(),
+        };
+        let mut picker = AccountPicker::new(
+            "Accounts",
+            vec![
+                AccountPickerItem::action(
+                    "cursor",
+                    "Cursor",
+                    "Imported account `GSG01`",
+                    "ready · quota refreshing · Open-Codex import · id cursor-account-1",
+                    command,
+                )
+                .with_details(vec![("Quota".into(), "Refreshing…".into())]),
+            ],
+        );
+
+        assert!(picker.update_switch_provider_item(
+            "cursor",
+            "cursor",
+            "cursor-account-1",
+            "ready · quota 25% used · Open-Codex import · id cursor-account-1".into(),
+            vec![
+                ("Billing cycle".into(), "25% used · resets in 4d".into()),
+                ("Remaining".into(), "$37.50".into()),
+                ("Full usage details".into(), "/usage".into()),
+            ],
+        ));
+        let selected = picker.selected_item().expect("updated account row");
+        assert!(selected.subtitle.contains("quota 25% used"));
+        assert!(
+            selected
+                .details
+                .contains(&("Remaining".into(), "$37.50".into()))
+        );
+        assert!(matches!(
+            picker
+                .handle_overlay_key(KeyCode::Enter, KeyModifiers::empty())
+                .unwrap(),
+            OverlayAction::Execute(AccountPickerCommand::SwitchProvider {
+                provider_id,
+                source_provider,
+                label,
+            }) if provider_id == "cursor"
+                && source_provider == "cursor"
+                && label == "cursor-account-1"
+        ));
     }
 
     #[test]

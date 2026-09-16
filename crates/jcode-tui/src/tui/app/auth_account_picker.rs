@@ -141,17 +141,33 @@ impl App {
                         (false, true) => "ready",
                         (false, false) => "expired",
                     };
-                    items.push(AccountPickerItem::action(
+                    let quota_pending = provider.id == "cursor" && *source_provider == "cursor";
+                    let subtitle = if quota_pending {
+                        format!(
+                            "{state} · quota refreshing · Open-Codex import · id {}",
+                            account.account_id
+                        )
+                    } else {
+                        format!("{state} · Open-Codex import · id {}", account.account_id)
+                    };
+                    let mut item = AccountPickerItem::action(
                         provider.id,
                         provider.display_name,
                         format!("Imported account `{}`", account.label),
-                        format!("{state} · Open-Codex import · id {}", account.account_id),
+                        subtitle,
                         AccountPickerCommand::SwitchProvider {
                             provider_id: provider.id.to_string(),
                             source_provider: source_provider.to_string(),
                             label: account.account_id,
                         },
-                    ));
+                    );
+                    if quota_pending {
+                        item = item.with_details(vec![
+                            ("Quota".to_string(), "Refreshing…".to_string()),
+                            ("Full usage details".to_string(), "/usage".to_string()),
+                        ]);
+                    }
+                    items.push(item);
                 }
             }
 
@@ -365,7 +381,108 @@ impl App {
         self.inline_interactive_state = None;
         self.input.clear();
         self.cursor_pos = 0;
-        self.set_status_notice("Account center: choose an action");
+        let refresh_cursor_quotas = provider_filter.is_none_or(|provider| provider == "cursor")
+            && !crate::auth::imported_pool::list_provider("cursor").is_empty();
+        if refresh_cursor_quotas {
+            self.request_usage_report();
+            self.set_status_notice("Account center: refreshing Cursor quotas");
+        } else {
+            self.set_status_notice("Account center: choose an action");
+        }
+    }
+
+    pub(crate) fn update_account_center_usage(&mut self, reports: &[crate::usage::ProviderUsage]) {
+        let Some(picker) = self.account_picker_overlay.as_ref() else {
+            return;
+        };
+        let accounts = crate::auth::imported_pool::list_provider("cursor");
+        if accounts.is_empty() {
+            return;
+        }
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let mut picker = picker.borrow_mut();
+        for report in reports {
+            let Some(account_id) = report
+                .extra_info
+                .iter()
+                .find_map(|(key, value)| (key == "Account ID").then_some(value.as_str()))
+            else {
+                continue;
+            };
+            let Some(account) = accounts
+                .iter()
+                .find(|account| account.account_id == account_id)
+            else {
+                continue;
+            };
+            let usable = account
+                .expires_at
+                .map(|expires| expires > now_ms)
+                .unwrap_or(true)
+                || account
+                    .refresh_token
+                    .as_deref()
+                    .is_some_and(|refresh| !refresh.trim().is_empty());
+            let state = match (account.active, usable) {
+                (true, true) => "active",
+                (true, false) => "active · expired",
+                (false, true) => "ready",
+                (false, false) => "expired",
+            };
+            let max_percent = report
+                .limits
+                .iter()
+                .map(|limit| limit.usage_percent)
+                .fold(0.0_f32, f32::max);
+            let quota_summary = if report.error.is_some() {
+                "quota unavailable".to_string()
+            } else if report.hard_limit_reached {
+                "quota exhausted".to_string()
+            } else if report.limits.is_empty() {
+                "quota status available".to_string()
+            } else {
+                format!("quota {:.0}% used", max_percent)
+            };
+            let subtitle = format!(
+                "{state} · {quota_summary} · Open-Codex import · id {}",
+                account.account_id
+            );
+            let mut details = Vec::new();
+            if let Some(error) = &report.error {
+                details.push(("Quota".to_string(), error.clone()));
+            } else {
+                if report.hard_limit_reached {
+                    details.push(("Quota".to_string(), "Hard limit reached".to_string()));
+                }
+                for limit in &report.limits {
+                    let reset = limit
+                        .resets_at
+                        .as_deref()
+                        .map(crate::usage::format_reset_time)
+                        .map(|value| format!(" · resets in {value}"))
+                        .unwrap_or_default();
+                    details.push((
+                        limit.name.clone(),
+                        format!("{:.0}% used{reset}", limit.usage_percent),
+                    ));
+                }
+                details.extend(
+                    report
+                        .extra_info
+                        .iter()
+                        .filter(|(key, _)| key != "Account ID")
+                        .cloned(),
+                );
+            }
+            details.push(("Full usage details".to_string(), "/usage".to_string()));
+            picker.update_switch_provider_item(
+                "cursor",
+                "cursor",
+                &account.account_id,
+                subtitle,
+                details,
+            );
+        }
     }
 
     pub(crate) fn open_account_add_replace_flow(&mut self, provider_filter: Option<&str>) {

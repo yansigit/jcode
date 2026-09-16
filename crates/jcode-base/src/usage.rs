@@ -347,7 +347,17 @@ fn enqueue_provider_usage_tasks(tasks: &mut tokio::task::JoinSet<Option<Provider
         total += 1;
     }
 
-    if auth::cursor::has_cursor_api_key() {
+    let cursor_accounts = auth::imported_pool::list_provider("cursor");
+    if !cursor_accounts.is_empty() {
+        total += cursor_accounts.len();
+        for account in cursor_accounts {
+            tasks.spawn(async move {
+                let mut report = fetch_cursor_usage_for_account(account).await;
+                attach_activity(&mut report, "cursor");
+                Some(report)
+            });
+        }
+    } else if auth::cursor::has_cursor_api_key() {
         tasks.spawn(async {
             fetch_cursor_usage_report().await.map(|mut report| {
                 attach_activity(&mut report, "cursor");
@@ -376,7 +386,10 @@ fn activity_source_has_dedicated_report(source_key: &str) -> bool {
         "copilot" => auth::copilot::has_copilot_credentials(),
         "antigravity" => auth::antigravity::has_cached_auth(),
         "gemini" => auth::gemini::has_api_key(),
-        "cursor" => auth::cursor::has_cursor_api_key(),
+        "cursor" => {
+            auth::cursor::has_cursor_api_key()
+                || !auth::imported_pool::list_provider("cursor").is_empty()
+        }
         _ => {
             // Direct OpenAI-compatible profiles are reported by the API-key
             // module whenever their key is configured.
