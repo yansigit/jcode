@@ -408,7 +408,6 @@ pub(super) async fn fetch_antigravity_usage_report() -> Option<ProviderUsage> {
         }
     };
 
-    let mut limits = Vec::new();
     let mut extra_info = Vec::new();
 
     if let Ok(tokens) = auth::antigravity::load_tokens()
@@ -417,6 +416,29 @@ pub(super) async fn fetch_antigravity_usage_report() -> Option<ProviderUsage> {
         extra_info.push(("Account".to_string(), mask_email(email)));
     }
 
+    Some(antigravity_usage_report_from_snapshot(
+        "Antigravity".to_string(),
+        None,
+        None,
+        &snapshot,
+        extra_info,
+    ))
+}
+
+fn antigravity_usage_report_from_snapshot(
+    display_name: String,
+    account_id: Option<String>,
+    source_provider: Option<String>,
+    snapshot: &crate::provider::antigravity::CatalogSnapshot,
+    mut extra_info: Vec<(String, String)>,
+) -> ProviderUsage {
+    if let Some(account_id) = account_id {
+        extra_info.push(("Account ID".to_string(), account_id));
+    }
+    if let Some(source_provider) = source_provider {
+        extra_info.push(("Source provider".to_string(), source_provider));
+    }
+    let mut limits = Vec::new();
     let mut seen_names = std::collections::HashSet::new();
     for model in &snapshot.models {
         let Some(remaining_milli) = model.remaining_fraction_milli else {
@@ -444,18 +466,80 @@ pub(super) async fn fetch_antigravity_usage_report() -> Option<ProviderUsage> {
         });
     }
 
-    if limits.is_empty() && extra_info.is_empty() {
-        return None;
-    }
-
-    Some(ProviderUsage {
-        provider_name: "Antigravity".to_string(),
+    ProviderUsage {
+        provider_name: display_name,
         limits,
         extra_info,
         hard_limit_reached: false,
         error: None,
         last_used_unix_secs: None,
-    })
+    }
+}
+
+pub(super) async fn fetch_antigravity_usage_for_account(
+    account: auth::imported_pool::ImportedAccount,
+) -> ProviderUsage {
+    let display_name = format!("Antigravity {}", account.label);
+    let account_id = account.account_id.clone();
+    let source_provider = account.provider.clone();
+    let mut tokens = auth::antigravity::AntigravityTokens {
+        access_token: account.access_token,
+        refresh_token: account.refresh_token.unwrap_or_default(),
+        expires_at: account.expires_at.unwrap_or(i64::MAX),
+        email: None,
+        project_id: None,
+    };
+    if tokens.is_expired() && !tokens.refresh_token.is_empty() {
+        match auth::antigravity::refresh_tokens(&tokens).await {
+            Ok(refreshed) => tokens = refreshed,
+            Err(error) => {
+                return ProviderUsage {
+                    provider_name: display_name,
+                    extra_info: vec![
+                        ("Account ID".to_string(), account_id),
+                        ("Source provider".to_string(), source_provider),
+                    ],
+                    error: Some(format!("Failed to refresh Antigravity account: {error}")),
+                    ..Default::default()
+                };
+            }
+        }
+    }
+
+    let client = crate::provider::shared_http_client();
+    match crate::provider::antigravity::fetch_catalog_snapshot_for_tokens(
+        &client,
+        &mut tokens,
+        false,
+    )
+    .await
+    {
+        Ok(snapshot) if !snapshot.models.is_empty() => antigravity_usage_report_from_snapshot(
+            display_name,
+            Some(account_id),
+            Some(source_provider),
+            &snapshot,
+            Vec::new(),
+        ),
+        Ok(_) => ProviderUsage {
+            provider_name: display_name,
+            extra_info: vec![
+                ("Account ID".to_string(), account_id),
+                ("Source provider".to_string(), source_provider),
+            ],
+            error: Some("Antigravity model catalog returned no models".to_string()),
+            ..Default::default()
+        },
+        Err(error) => ProviderUsage {
+            provider_name: display_name,
+            extra_info: vec![
+                ("Account ID".to_string(), account_id),
+                ("Source provider".to_string(), source_provider),
+            ],
+            error: Some(format!("Failed to fetch model quotas: {error}")),
+            ..Default::default()
+        },
+    }
 }
 
 /// Gemini API key validity report. Google does not expose per-key spend or
@@ -539,7 +623,10 @@ pub(super) fn cursor_usage_report_from_payload(
     payload: &serde_json::Value,
 ) -> ProviderUsage {
     let mut limits = Vec::new();
-    let mut extra_info = vec![("Account ID".to_string(), account_id)];
+    let mut extra_info = vec![
+        ("Account ID".to_string(), account_id),
+        ("Source provider".to_string(), "cursor".to_string()),
+    ];
     let resets_at = cursor_reset_timestamp(payload.get("billingCycleEnd"));
 
     if let Some(plan_usage) = payload.get("planUsage") {
@@ -651,7 +738,10 @@ pub(super) async fn fetch_cursor_usage_for_account(
         Ok(payload) => cursor_usage_report_from_payload(display_name, account_id, &payload),
         Err(error) => ProviderUsage {
             provider_name: display_name,
-            extra_info: vec![("Account ID".to_string(), account_id)],
+            extra_info: vec![
+                ("Account ID".to_string(), account_id),
+                ("Source provider".to_string(), "cursor".to_string()),
+            ],
             error: Some(error.to_string()),
             ..Default::default()
         },

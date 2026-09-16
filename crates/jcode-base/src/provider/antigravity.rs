@@ -119,6 +119,16 @@ async fn fetch_available_models_with_project(
 pub async fn fetch_catalog_snapshot(client: &reqwest::Client) -> Result<CatalogSnapshot> {
     let mut tokens = antigravity_auth::load_or_refresh_tokens().await?;
 
+    fetch_catalog_snapshot_for_tokens(client, &mut tokens, true).await
+}
+
+/// Fetch quota-bearing catalog data for a specific Antigravity credential.
+/// Imported account quota fan-out uses this without changing the active account.
+pub async fn fetch_catalog_snapshot_for_tokens(
+    client: &reqwest::Client,
+    tokens: &mut antigravity_auth::AntigravityTokens,
+    persist_native_tokens: bool,
+) -> Result<CatalogSnapshot> {
     if let Some(project_id) = tokens
         .project_id
         .as_deref()
@@ -134,7 +144,9 @@ pub async fn fetch_catalog_snapshot(client: &reqwest::Client) -> Result<CatalogS
 
     if let Ok(project_id) = antigravity_auth::fetch_project_id(&tokens.access_token).await {
         tokens.project_id = Some(project_id.clone());
-        let _ = antigravity_auth::save_tokens(&tokens);
+        if persist_native_tokens {
+            let _ = antigravity_auth::save_tokens(tokens);
+        }
         if let Ok(snapshot) =
             fetch_available_models_with_project(client, &tokens.access_token, Some(&project_id))
                 .await

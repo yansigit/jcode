@@ -505,6 +505,21 @@ async fn apply_terminal_event(
                                 ))),
                             }
                         }
+                        crate::tui::AccountPickerAction::SwitchImported {
+                            provider_id,
+                            source_provider,
+                            label,
+                        } => {
+                            super::auth::execute_account_command_local(
+                                app,
+                                super::auth::AccountCommand::SwitchImported {
+                                    provider_id: provider_id.clone(),
+                                    source_provider,
+                                    label,
+                                },
+                            );
+                            remote.notify_auth_changed_for_provider_detached(Some(&provider_id));
+                        }
                         crate::tui::AccountPickerAction::Add { .. }
                         | crate::tui::AccountPickerAction::Replace { .. }
                         | crate::tui::AccountPickerAction::OpenCenter { .. } => {}

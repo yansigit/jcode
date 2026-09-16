@@ -2309,6 +2309,30 @@ impl App {
                     ))),
                 }
             }
+            AccountPickerAction::SwitchImported {
+                provider_id,
+                source_provider,
+                label,
+            } => {
+                if self.is_remote {
+                    self.pending_account_picker_action =
+                        Some(AccountPickerAction::SwitchImported {
+                            provider_id: provider_id.clone(),
+                            source_provider: source_provider.clone(),
+                            label: label.clone(),
+                        });
+                    self.set_status_notice(format!("Account → {} ({})", label, provider_id));
+                    return;
+                }
+                super::auth::execute_account_command_local(
+                    self,
+                    super::auth::AccountCommand::SwitchImported {
+                        provider_id,
+                        source_provider,
+                        label,
+                    },
+                );
+            }
             AccountPickerAction::Add { provider_id } => match provider_id.as_str() {
                 "claude" => match crate::auth::claude::next_account_label() {
                     Ok(label) => self.start_claude_login_for_account(&label),
@@ -3911,10 +3935,9 @@ mod tests {
         REMOTE_MODEL_CATALOG_MAX_DETAIL_BYTES, RemoteModelCatalogCache,
         filter_routes_by_provider_allowlist, key_char_eq_ignore_ascii_case,
         model_picker_route_is_current, model_picker_route_is_default,
-        model_picker_route_is_recommended,
-        next_model_favorite_after_current, picker_is_runtime_model_picker,
-        remote_model_catalog_cache_is_fresh, remote_model_catalog_cache_origin,
-        remote_model_catalog_snapshot_is_safe,
+        model_picker_route_is_recommended, next_model_favorite_after_current,
+        picker_is_runtime_model_picker, remote_model_catalog_cache_is_fresh,
+        remote_model_catalog_cache_origin, remote_model_catalog_snapshot_is_safe,
     };
     use crate::tui::{
         AgentModelTarget, App, InlineInteractiveState, PickerAction, PickerEntry, PickerKind,
@@ -4446,11 +4469,7 @@ mod tests {
         app.is_remote = true;
         app.remote_provider_name = Some("Cursor".to_string());
         app.remote_provider_model = Some("cursor-grok-4.6-high-fast".to_string());
-        let signature = app.model_picker_cache_signature(
-            "cursor-grok-4.6-high-fast",
-            None,
-            None,
-        );
+        let signature = app.model_picker_cache_signature("cursor-grok-4.6-high-fast", None, None);
         let routes = vec![
             model_route("cursor-grok-4.6-low", "Cursor", "cursor"),
             model_route("cursor-grok-4.6-low-fast", "Cursor", "cursor"),

@@ -1,6 +1,25 @@
 use super::auth_account_picker_saved_accounts::{account_display_name, anthropic_account_use};
 use super::*;
 
+fn imported_provider_sources(provider_id: &str) -> &'static [&'static str] {
+    match provider_id {
+        "claude" => &["anthropic", "claude"],
+        "openai" => &["command-code", "openai-codex", "openai_codex", "openai"],
+        "antigravity" => &["google-antigravity", "antigravity"],
+        "gemini" => &["google-gemini-cli", "gemini-cli", "gemini"],
+        "copilot" => &["github-copilot", "copilot"],
+        "cursor" => &["cursor"],
+        _ => &[],
+    }
+}
+
+fn imported_source_has_live_quota(source_provider: &str) -> bool {
+    matches!(
+        source_provider,
+        "cursor" | "google-antigravity" | "antigravity"
+    )
+}
+
 impl App {
     pub(crate) fn open_account_center(&mut self, provider_filter: Option<&str>) {
         use crate::tui::account_picker::{AccountPicker, AccountPickerCommand, AccountPickerItem};
@@ -113,14 +132,7 @@ impl App {
                 _ => {}
             }
 
-            let imported_providers: &[&str] = match provider.id {
-                "claude" => &["anthropic", "claude"],
-                "openai" => &["command-code", "openai-codex", "openai_codex", "openai"],
-                "antigravity" => &["google-antigravity", "antigravity"],
-                "gemini" => &["google-gemini-cli", "gemini-cli", "gemini"],
-                "copilot" => &["github-copilot", "copilot"],
-                id => &[id],
-            };
+            let imported_providers = imported_provider_sources(provider.id);
             for source_provider in imported_providers {
                 let imported = crate::auth::imported_pool::list_provider(source_provider);
                 if imported.is_empty() {
@@ -141,7 +153,7 @@ impl App {
                         (false, true) => "ready",
                         (false, false) => "expired",
                     };
-                    let quota_pending = provider.id == "cursor" && *source_provider == "cursor";
+                    let quota_pending = imported_source_has_live_quota(source_provider);
                     let subtitle = if quota_pending {
                         format!(
                             "{state} · quota refreshing · Open-Codex import · id {}",
@@ -381,11 +393,15 @@ impl App {
         self.inline_interactive_state = None;
         self.input.clear();
         self.cursor_pos = 0;
-        let refresh_cursor_quotas = provider_filter.is_none_or(|provider| provider == "cursor")
-            && !crate::auth::imported_pool::list_provider("cursor").is_empty();
-        if refresh_cursor_quotas {
+        let refresh_imported_quotas = crate::provider_catalog::login_providers()
+            .iter()
+            .filter(|provider| provider_filter.is_none_or(|filter| filter == provider.id))
+            .flat_map(|provider| imported_provider_sources(provider.id).iter().copied())
+            .filter(|source| imported_source_has_live_quota(source))
+            .any(|source| !crate::auth::imported_pool::list_provider(source).is_empty());
+        if refresh_imported_quotas {
             self.request_usage_report();
-            self.set_status_notice("Account center: refreshing Cursor quotas");
+            self.set_status_notice("Account center: refreshing account quotas");
         } else {
             self.set_status_notice("Account center: choose an action");
         }
@@ -395,10 +411,6 @@ impl App {
         let Some(picker) = self.account_picker_overlay.as_ref() else {
             return;
         };
-        let accounts = crate::auth::imported_pool::list_provider("cursor");
-        if accounts.is_empty() {
-            return;
-        }
         let now_ms = chrono::Utc::now().timestamp_millis();
         let mut picker = picker.borrow_mut();
         for report in reports {
@@ -409,6 +421,19 @@ impl App {
             else {
                 continue;
             };
+            let Some(source_provider) = report
+                .extra_info
+                .iter()
+                .find_map(|(key, value)| (key == "Source provider").then_some(value.as_str()))
+            else {
+                continue;
+            };
+            let provider_id = match source_provider {
+                "google-antigravity" | "antigravity" => "antigravity",
+                "cursor" => "cursor",
+                _ => continue,
+            };
+            let accounts = crate::auth::imported_pool::list_provider(source_provider);
             let Some(account) = accounts
                 .iter()
                 .find(|account| account.account_id == account_id)
@@ -470,14 +495,14 @@ impl App {
                     report
                         .extra_info
                         .iter()
-                        .filter(|(key, _)| key != "Account ID")
+                        .filter(|(key, _)| key != "Account ID" && key != "Source provider")
                         .cloned(),
                 );
             }
             details.push(("Full usage details".to_string(), "/usage".to_string()));
             picker.update_switch_provider_item(
-                "cursor",
-                "cursor",
+                provider_id,
+                source_provider,
                 &account.account_id,
                 subtitle,
                 details,
@@ -656,7 +681,7 @@ impl App {
         .unwrap_or_default()
         .to_ascii_lowercase();
 
-        let mut models = Vec::with_capacity(claude_accounts.len() + openai_accounts.len() + 4);
+        let mut models = Vec::with_capacity(claude_accounts.len() + openai_accounts.len() + 12);
         let mut selected = 0usize;
 
         for account in &claude_accounts {
@@ -765,6 +790,68 @@ impl App {
                 created_date: None,
                 effort: None,
             });
+        }
+
+        // Open-Codex can contribute multiple accounts for providers beyond the
+        // two native account stores above. Keep them directly selectable in the
+        // primary `/account` picker instead of hiding them behind account center.
+        for provider in crate::provider_catalog::login_providers()
+            .iter()
+            .filter(|provider| !matches!(provider.id, "claude" | "openai"))
+        {
+            for source_provider in imported_provider_sources(provider.id) {
+                for account in crate::auth::imported_pool::list_provider(source_provider) {
+                    let usable = account
+                        .expires_at
+                        .map(|expires| expires > now_ms)
+                        .unwrap_or(true)
+                        || account
+                            .refresh_token
+                            .as_deref()
+                            .is_some_and(|refresh| !refresh.trim().is_empty());
+                    let status = match (account.active, usable) {
+                        (true, true) => "active",
+                        (true, false) => "active · expired",
+                        (false, true) => "saved",
+                        (false, false) => "expired",
+                    };
+                    let idx = models.len();
+                    if account.active && current_provider.contains(provider.id) {
+                        selected = idx;
+                    }
+                    models.push(crate::tui::PickerEntry {
+                        name: format!("{} · {}", provider.display_name, account.label),
+                        options: vec![crate::tui::PickerOption {
+                            model: None,
+                            provider: provider.display_name.to_string(),
+                            api_method: if account.active { "active" } else { "saved" }.to_string(),
+                            available: usable,
+                            detail: format!(
+                                "{} · Open-Codex import · id {}",
+                                status, account.account_id
+                            ),
+                            estimated_reference_cost_micros: None,
+                        }],
+                        action: crate::tui::PickerAction::Account(
+                            crate::tui::AccountPickerAction::SwitchImported {
+                                provider_id: provider.id.to_string(),
+                                source_provider: source_provider.to_string(),
+                                label: account.account_id,
+                            },
+                        ),
+                        selected_option: 0,
+                        is_current: account.active,
+                        is_default: false,
+                        is_favorite: false,
+                        recommended: false,
+                        recommendation_rank: usize::MAX,
+                        usage_score: 0,
+                        old: false,
+                        created_date: None,
+                        effort: None,
+                    });
+                }
+            }
         }
 
         models.push(crate::tui::PickerEntry {

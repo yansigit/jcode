@@ -1283,10 +1283,25 @@ impl PickerKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AccountPickerAction {
-    Switch { provider_id: String, label: String },
-    Add { provider_id: String },
-    Replace { provider_id: String, label: String },
-    OpenCenter { provider_filter: Option<String> },
+    Switch {
+        provider_id: String,
+        label: String,
+    },
+    SwitchImported {
+        provider_id: String,
+        source_provider: String,
+        label: String,
+    },
+    Add {
+        provider_id: String,
+    },
+    Replace {
+        provider_id: String,
+        label: String,
+    },
+    OpenCenter {
+        provider_filter: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1378,6 +1393,11 @@ fn estimate_picker_action_bytes(action: &PickerAction) -> usize {
         PickerAction::Account(AccountPickerAction::Switch { provider_id, label }) => {
             provider_id.capacity() + label.capacity()
         }
+        PickerAction::Account(AccountPickerAction::SwitchImported {
+            provider_id,
+            source_provider,
+            label,
+        }) => provider_id.capacity() + source_provider.capacity() + label.capacity(),
         PickerAction::Account(AccountPickerAction::Add { provider_id }) => provider_id.capacity(),
         PickerAction::Account(AccountPickerAction::Replace { provider_id, label }) => {
             provider_id.capacity() + label.capacity()
@@ -1615,9 +1635,9 @@ impl PickerEntry {
 
     pub fn account_state_label(&self) -> Option<&'static str> {
         match &self.action {
-            PickerAction::Account(AccountPickerAction::Switch { .. }) => {
-                Some(if self.is_current { "active" } else { "saved" })
-            }
+            PickerAction::Account(
+                AccountPickerAction::Switch { .. } | AccountPickerAction::SwitchImported { .. },
+            ) => Some(if self.is_current { "active" } else { "saved" }),
             PickerAction::Account(AccountPickerAction::Add { .. }) => Some("add"),
             PickerAction::Account(AccountPickerAction::Replace { .. }) => Some("replace"),
             PickerAction::Account(AccountPickerAction::OpenCenter { .. }) => Some("manage"),

@@ -327,7 +327,20 @@ fn enqueue_provider_usage_tasks(tasks: &mut tokio::task::JoinSet<Option<Provider
         total += 1;
     }
 
-    if auth::antigravity::has_cached_auth() {
+    let antigravity_accounts = auth::imported_pool::list_provider("google-antigravity")
+        .into_iter()
+        .chain(auth::imported_pool::list_provider("antigravity"))
+        .collect::<Vec<_>>();
+    if !antigravity_accounts.is_empty() {
+        total += antigravity_accounts.len();
+        for account in antigravity_accounts {
+            tasks.spawn(async move {
+                let mut report = fetch_antigravity_usage_for_account(account).await;
+                attach_activity(&mut report, "antigravity");
+                Some(report)
+            });
+        }
+    } else if auth::antigravity::has_cached_auth() {
         tasks.spawn(async {
             fetch_antigravity_usage_report().await.map(|mut report| {
                 attach_activity(&mut report, "antigravity");
