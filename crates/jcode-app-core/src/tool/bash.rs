@@ -623,8 +623,47 @@ fn tool_scratch_dir() -> Option<std::path::PathBuf> {
 }
 
 #[cfg(not(windows))]
+fn session_tool_scratch_dir(session_id: &str) -> Option<std::path::PathBuf> {
+    let safe_session_id: String = session_id
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .take(96)
+        .collect();
+    let safe_session_id = if safe_session_id.is_empty() {
+        "unknown"
+    } else {
+        safe_session_id.as_str()
+    };
+    let dir = tool_scratch_dir()?.join(format!("session-{safe_session_id}"));
+    crate::storage::ensure_dir(&dir).ok()?;
+    let marker = dir.join(".jcode-disposable");
+    std::fs::write(marker, format!("{session_id}\n")).ok()?;
+    Some(dir)
+}
+
+#[cfg(not(windows))]
 fn configure_tool_scratch(command: &mut TokioCommand) {
     if let Some(dir) = tool_scratch_dir() {
+        command.env("TMPDIR", &dir).env("JCODE_SCRATCH_DIR", dir);
+    }
+}
+
+#[cfg(not(windows))]
+fn configure_session_tool_scratch(command: &mut TokioCommand, session_id: &str) {
+    if let Some(dir) = session_tool_scratch_dir(session_id) {
+        command.env("TMPDIR", &dir).env("JCODE_SCRATCH_DIR", dir);
+    }
+}
+
+#[cfg(unix)]
+fn configure_session_tool_scratch_std(command: &mut StdCommand, session_id: &str) {
+    if let Some(dir) = session_tool_scratch_dir(session_id) {
         command.env("TMPDIR", &dir).env("JCODE_SCRATCH_DIR", dir);
     }
 }
@@ -799,6 +838,44 @@ mod utf8_truncation_tests {
         assert_eq!(paths, vec![expected.as_str(), expected.as_str()]);
         assert!(std::path::Path::new(&expected).is_dir());
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn session_scratch_is_isolated_and_marked_disposable() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("temp scratch root");
+        let previous = std::env::var_os("JCODE_SCRATCH_DIR");
+        crate::env::set_var("JCODE_SCRATCH_DIR", temp.path());
+
+        let first = super::session_tool_scratch_dir("session/one").expect("first scratch");
+        let second = super::session_tool_scratch_dir("session-two").expect("second scratch");
+        assert_eq!(first.parent(), Some(temp.path()));
+        assert_eq!(
+            first.file_name().and_then(|name| name.to_str()),
+            Some("session-session_one")
+        );
+        assert_ne!(first, second);
+        assert!(first.join(".jcode-disposable").is_file());
+        assert!(second.join(".jcode-disposable").is_file());
+
+        let mut command =
+            build_shell_command("printf '%s\\n%s\\n' \"$TMPDIR\" \"$JCODE_SCRATCH_DIR\"");
+        super::configure_session_tool_scratch(&mut command, "session/one");
+        let output = command.output().await.expect("run session scratch probe");
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout).expect("utf-8 scratch paths");
+        let first = first.to_string_lossy().into_owned();
+        assert_eq!(
+            stdout.lines().collect::<Vec<_>>(),
+            vec![first.as_str(), first.as_str()]
+        );
+
+        if let Some(previous) = previous {
+            crate::env::set_var("JCODE_SCRATCH_DIR", previous);
+        } else {
+            crate::env::remove_var("JCODE_SCRATCH_DIR");
+        }
+    }
 }
 
 pub struct BashTool;
@@ -938,6 +1015,8 @@ impl BashTool {
         let has_stdin_channel = ctx.stdin_request_tx.is_some();
 
         let mut command = build_shell_command(&params.command);
+        #[cfg(not(windows))]
+        configure_session_tool_scratch(&mut command, &ctx.session_id);
         command
             .kill_on_drop(true)
             .stdout(Stdio::piped())
@@ -1158,6 +1237,7 @@ impl BashTool {
         let display_name = summarize_background_command(params.intent.as_deref(), &params.command);
 
         let mut cmd = build_detached_shell_wrapper(&params.command);
+        configure_session_tool_scratch_std(&mut cmd, &ctx.session_id);
         let stdout = OpenOptions::new()
             .create(true)
             .append(true)
@@ -1299,6 +1379,7 @@ impl BashTool {
         let description = params.intent.clone();
         let display_name = summarize_background_command(description.as_deref(), &command);
         let working_dir = ctx.working_dir.clone();
+        let session_id = ctx.session_id.clone();
         let timeout_ms = params.timeout.map(|timeout| timeout.min(600000));
         let timeout_duration = timeout_ms.map(Duration::from_millis);
 
@@ -1311,17 +1392,19 @@ impl BashTool {
                 &ctx.session_id,
                 notify,
                 wake,
-				move |output_path| async move {
-					let mut cmd = build_shell_command(&command);
-					#[cfg(unix)]
-					unsafe {
-						cmd.pre_exec(|| {
-							if libc::setpgid(0, 0) == -1 {
-								return Err(std::io::Error::last_os_error());
-							}
-							Ok(())
-						});
-					}
+                move |output_path| async move {
+                    let mut cmd = build_shell_command(&command);
+                    #[cfg(not(windows))]
+                    configure_session_tool_scratch(&mut cmd, &session_id);
+                    #[cfg(unix)]
+                    unsafe {
+                        cmd.pre_exec(|| {
+                            if libc::setpgid(0, 0) == -1 {
+                                return Err(std::io::Error::last_os_error());
+                            }
+                            Ok(())
+                        });
+                    }
                     cmd.kill_on_drop(true);
                     configure_background_command_stdio(&mut cmd);
                     if let Some(ref dir) = working_dir {

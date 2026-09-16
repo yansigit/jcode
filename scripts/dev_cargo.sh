@@ -1011,7 +1011,7 @@ run_local_cargo() {
     local output_file
     output_file=$(mktemp "${TMPDIR:-/tmp}/jcode-dev-cargo.XXXXXX")
     local status=0
-    cargo "${cargo_argv[@]}" 2>&1 | tee "$output_file" || status=${PIPESTATUS[0]}
+    run_target_locked_cargo 2>&1 | tee "$output_file" || status=${PIPESTATUS[0]}
     if [[ "$status" -eq 0 ]] \
       && grep -qE '^running 0 tests$' "$output_file" \
       && ! grep -qE '^running [1-9][0-9]* tests$' "$output_file"; then
@@ -1023,7 +1023,78 @@ run_local_cargo() {
     return "$status"
   fi
 
-  cargo "${cargo_argv[@]}"
+  run_target_locked_cargo
+}
+
+target_cache_dir() {
+  local target="${CARGO_TARGET_DIR:-$repo_root/target}"
+  local explicit="false"
+  local index arg
+  for ((index = 0; index < ${#cargo_argv[@]}; index++)); do
+    arg="${cargo_argv[$index]}"
+    case "$arg" in
+      --) break ;;
+      --target-dir)
+        if (( index + 1 < ${#cargo_argv[@]} )); then
+          target="${cargo_argv[$((index + 1))]}"
+          explicit="true"
+        fi
+        ;;
+      --target-dir=*)
+        target="${arg#--target-dir=}"
+        explicit="true"
+        ;;
+    esac
+  done
+  if [[ "$explicit" == "false" && -z "${CARGO_TARGET_DIR:-}" ]] \
+    && command -v python3 >/dev/null 2>&1; then
+    local metadata configured
+    metadata=$(cargo metadata --format-version 1 --no-deps 2>/dev/null || true)
+    configured=$(printf '%s' "$metadata" | python3 -c \
+      'import json,sys; data=json.load(sys.stdin); print(data.get("target_directory", ""))' \
+      2>/dev/null || true)
+    [[ -n "$configured" ]] && target="$configured"
+  fi
+  if [[ "$target" != /* ]]; then
+    target="$repo_root/$target"
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    target=$(python3 -c 'import os,sys; print(os.path.abspath(sys.argv[1]))' "$target")
+  fi
+  printf '%s\n' "$target"
+}
+
+target_cache_lock() {
+  local target parent name
+  target=$(target_cache_dir)
+  parent=$(dirname "$target")
+  name=$(printf '%s' "$(basename "$target")" | tr -c 'A-Za-z0-9._-' '_')
+  # Keep the lock outside the directory Cargo may remove during `cargo clean`.
+  printf '%s/.jcode-target-cache-%s.lock\n' "$parent" "$name"
+}
+
+run_target_locked_cargo() {
+  if command -v python3 >/dev/null 2>&1; then
+    python3 "$repo_root/scripts/target_cache.py" run \
+      --lock "$(target_cache_lock)" -- cargo "${cargo_argv[@]}"
+  else
+    cargo "${cargo_argv[@]}"
+  fi
+}
+
+maybe_prune_target_cache() {
+  case "${JCODE_TARGET_CACHE_MAINTENANCE:-auto}" in
+    0|false|no|off|disabled) return 0 ;;
+  esac
+  command -v python3 >/dev/null 2>&1 || return 0
+  python3 "$repo_root/scripts/target_cache.py" prune \
+    --lock "$(target_cache_lock)" \
+    --target "$(target_cache_dir)" \
+    --max-gib "${JCODE_TARGET_CACHE_MAX_GIB:-30}" \
+    --min-age-days "${JCODE_TARGET_CACHE_MIN_AGE_DAYS:-7}" \
+    --interval-hours "${JCODE_TARGET_CACHE_INTERVAL_HOURS:-1}" \
+    --keep-generations "${JCODE_TARGET_CACHE_KEEP_GENERATIONS:-3}" || \
+    log "automatic target cache maintenance failed; continuing without pruning"
 }
 
 cargo_action_needs_gate() {
@@ -1132,4 +1203,9 @@ acquire_cargo_gate
 # have drained. Measuring before the wait would preserve an unnecessarily low
 # one-job decision even after memory becomes available.
 select_build_jobs
-run_local_cargo
+status=0
+run_local_cargo || status=$?
+if [[ "$status" -eq 0 ]]; then
+  maybe_prune_target_cache
+fi
+exit "$status"

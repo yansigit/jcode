@@ -1,15 +1,18 @@
 use std::collections::HashSet;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
+use fs2::FileExt;
 use serde::Serialize;
 
 use super::args::StorageCommand;
 
 const BUILD_VERSION_MIN_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+const AUTOMATIC_SCRATCH_MIN_AGE: Duration = Duration::from_secs(72 * 60 * 60);
+const AUTOMATIC_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Debug, Serialize)]
 struct StorageEntry {
@@ -58,6 +61,109 @@ pub(crate) fn run(action: StorageCommand) -> Result<()> {
             json,
         ),
     }
+}
+
+pub(crate) fn run_automatic_maintenance() {
+    if matches!(
+        std::env::var("JCODE_STORAGE_MAINTENANCE").as_deref(),
+        Ok("0" | "false" | "no" | "off")
+    ) {
+        return;
+    }
+    if let Err(error) = run_automatic_maintenance_inner(SystemTime::now()) {
+        crate::logging::warn(&format!("automatic storage maintenance skipped: {error:#}"));
+    }
+}
+
+fn run_automatic_maintenance_inner(now: SystemTime) -> Result<usize> {
+    let jcode = crate::storage::jcode_dir()?;
+    crate::storage::ensure_dir(&jcode)?;
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(jcode.join("storage-maintenance.lock"))?;
+    if lock.try_lock_exclusive().is_err() {
+        return Ok(0);
+    }
+
+    let stamp = jcode.join("storage-maintenance-at");
+    if stamp
+        .metadata()
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| now.duration_since(modified).ok())
+        .is_some_and(|age| age < AUTOMATIC_MAINTENANCE_INTERVAL)
+    {
+        return Ok(0);
+    }
+
+    let removed = automatic_scratch_maintenance_in(&jcode, now)?;
+    let timestamp = now
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    fs::write(&stamp, format!("{timestamp}\n"))?;
+    Ok(removed)
+}
+
+fn automatic_scratch_maintenance_in(jcode: &Path, now: SystemTime) -> Result<usize> {
+    let active_sessions = crate::session::session_presence()
+        .into_iter()
+        .map(|presence| presence.session_id)
+        .collect::<HashSet<_>>();
+    let default_scratch = jcode.join("scratch");
+    let mut scratch_roots = vec![default_scratch.clone()];
+    if let Some(configured) = std::env::var_os("JCODE_SCRATCH_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .filter(|path| path != &default_scratch)
+    {
+        scratch_roots.push(configured);
+    }
+    let mut removed = 0usize;
+    for scratch in scratch_roots {
+        removed +=
+            automatic_scratch_maintenance_with_active_sessions(&scratch, now, &active_sessions)?;
+    }
+    Ok(removed)
+}
+
+fn automatic_scratch_maintenance_with_active_sessions(
+    scratch: &Path,
+    now: SystemTime,
+    active_sessions: &HashSet<String>,
+) -> Result<usize> {
+    let active_cwds = active_working_directories().unwrap_or_default();
+    let Ok(entries) = fs::read_dir(scratch) else {
+        return Ok(0);
+    };
+    let mut candidates = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let marker = path.join(".jcode-disposable");
+        if !marker.is_file() {
+            continue;
+        }
+        let owner = fs::read_to_string(&marker).unwrap_or_default();
+        if active_sessions.contains(owner.trim()) {
+            continue;
+        }
+        if scratch_path_deletable_bytes(&path, AUTOMATIC_SCRATCH_MIN_AGE, now, &active_cwds, false)
+            .is_some()
+        {
+            candidates.push(path);
+        }
+    }
+
+    let mut removed = 0usize;
+    for path in candidates {
+        if remove_scratch_candidate_if_still_safe_at(&path, AUTOMATIC_SCRATCH_MIN_AGE, false, now)?
+        {
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 fn run_status(json: bool) -> Result<()> {
@@ -324,18 +430,27 @@ fn remove_scratch_candidate_if_still_safe(
     min_age: Duration,
     include_clean_git: bool,
 ) -> Result<bool> {
-    let Some(active_cwds) = active_working_directories() else {
+    remove_scratch_candidate_if_still_safe_at(path, min_age, include_clean_git, SystemTime::now())
+}
+
+fn remove_scratch_candidate_if_still_safe_at(
+    path: &Path,
+    min_age: Duration,
+    include_clean_git: bool,
+    now: SystemTime,
+) -> Result<bool> {
+    if scratch_owner_is_active(path) {
         return Ok(false);
+    }
+    let Some(active_cwds) = active_working_directories() else {
+        // Managed disposable scratch still has owner-session and age guards on
+        // platforms where enumerating every process CWD is unavailable.
+        if !path.join(".jcode-disposable").is_file() {
+            return Ok(false);
+        }
+        return remove_scratch_candidate_without_active_cwds(path, min_age, include_clean_git, now);
     };
-    if scratch_path_deletable_bytes(
-        path,
-        min_age,
-        SystemTime::now(),
-        &active_cwds,
-        include_clean_git,
-    )
-    .is_none()
-    {
+    if scratch_path_deletable_bytes(path, min_age, now, &active_cwds, include_clean_git).is_none() {
         return Ok(false);
     }
 
@@ -352,16 +467,11 @@ fn remove_scratch_candidate_if_still_safe(
     fs::rename(path, &quarantine)
         .with_context(|| format!("failed to quarantine {}", path.display()))?;
 
-    let safe_after_rename = active_working_directories().is_some_and(|active_cwds| {
-        scratch_path_deletable_bytes(
-            &quarantine,
-            min_age,
-            SystemTime::now(),
-            &active_cwds,
-            include_clean_git,
-        )
-        .is_some()
-    });
+    let safe_after_rename = !scratch_owner_is_active(&quarantine)
+        && active_working_directories().is_some_and(|active_cwds| {
+            scratch_path_deletable_bytes(&quarantine, min_age, now, &active_cwds, include_clean_git)
+                .is_some()
+        });
     if !safe_after_rename {
         fs::rename(&quarantine, path).with_context(|| {
             format!(
@@ -378,6 +488,57 @@ fn remove_scratch_candidate_if_still_safe(
         )
     })?;
     Ok(true)
+}
+
+fn remove_scratch_candidate_without_active_cwds(
+    path: &Path,
+    min_age: Duration,
+    include_clean_git: bool,
+    now: SystemTime,
+) -> Result<bool> {
+    let empty = HashSet::new();
+    if scratch_path_deletable_bytes(path, min_age, now, &empty, include_clean_git).is_none() {
+        return Ok(false);
+    }
+    let Some(parent) = path.parent() else {
+        return Ok(false);
+    };
+    let quarantine = parent.join(format!(".jcode-cleanup-{}-fallback", std::process::id()));
+    if quarantine.exists() {
+        return Ok(false);
+    }
+    fs::rename(path, &quarantine)
+        .with_context(|| format!("failed to quarantine {}", path.display()))?;
+    let safe = !scratch_owner_is_active(&quarantine)
+        && scratch_path_deletable_bytes(&quarantine, min_age, now, &empty, include_clean_git)
+            .is_some();
+    if !safe {
+        fs::rename(&quarantine, path).with_context(|| {
+            format!(
+                "failed to restore protected scratch candidate {}",
+                path.display()
+            )
+        })?;
+        return Ok(false);
+    }
+    remove_path(&quarantine).with_context(|| {
+        format!(
+            "failed to remove quarantined scratch path {}",
+            path.display()
+        )
+    })?;
+    Ok(true)
+}
+
+fn scratch_owner_is_active(path: &Path) -> bool {
+    let Ok(owner) = fs::read_to_string(path.join(".jcode-disposable")) else {
+        return false;
+    };
+    let owner = owner.trim();
+    !owner.is_empty()
+        && crate::session::session_presence()
+            .into_iter()
+            .any(|presence| presence.session_id == owner)
 }
 
 fn scratch_path_deletable_bytes(
@@ -703,6 +864,50 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn automatic_maintenance_only_retires_stale_managed_scratch() {
+        let temp = tempfile::tempdir().unwrap();
+        let jcode = temp.path();
+        let scratch = jcode.join("scratch");
+        let managed_stale = scratch.join("session-stale");
+        let managed_recent = scratch.join("session-recent");
+        let managed_active = scratch.join("session-active");
+        let unmanaged_stale = scratch.join("legacy-unmanaged");
+        for path in [
+            &managed_stale,
+            &managed_recent,
+            &managed_active,
+            &unmanaged_stale,
+        ] {
+            write_bytes(&path.join("artifact"), 32);
+        }
+        fs::write(managed_stale.join(".jcode-disposable"), "stale-session\n").unwrap();
+        fs::write(managed_recent.join(".jcode-disposable"), "recent-session\n").unwrap();
+        fs::write(managed_active.join(".jcode-disposable"), "active-session\n").unwrap();
+
+        let now = SystemTime::now();
+        let future = now + Duration::from_secs(96 * 3600);
+        write_bytes(&managed_recent.join("recent"), 1);
+        fs::File::options()
+            .write(true)
+            .open(managed_recent.join("recent"))
+            .unwrap()
+            .set_modified(future - Duration::from_secs(3600))
+            .unwrap();
+        let removed = automatic_scratch_maintenance_with_active_sessions(
+            &scratch,
+            future,
+            &HashSet::from(["active-session".to_string()]),
+        )
+        .unwrap();
+
+        assert_eq!(removed, 1);
+        assert!(!managed_stale.exists());
+        assert!(managed_recent.exists());
+        assert!(managed_active.exists());
+        assert!(unmanaged_stale.exists());
     }
 
     #[test]

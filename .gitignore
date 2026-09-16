@@ -1,4 +1,5 @@
 /target
+/.jcode-target-cache-*.lock
 Cargo.lock
 __pycache__/
 ios_simulator_screenshot.png
