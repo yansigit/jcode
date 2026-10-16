@@ -180,6 +180,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
+          retention-days: 7
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.artifact }}.tar.gz
 
@@ -294,6 +295,7 @@ jobs:
       - name: Upload unsigned binary for signing
         uses: actions/upload-artifact@v4
         with:
+          retention-days: 7
           name: ${{ matrix.unsigned_artifact }}
           path: dist/${{ matrix.artifact }}.exe
 
@@ -416,6 +418,7 @@ jobs:
       - name: Upload final Windows artifacts
         uses: actions/upload-artifact@v4
         with:
+          retention-days: 7
           name: jcode-windows-x86_64
           path: |
             dist/jcode-windows-x86_64.exe
@@ -424,6 +427,7 @@ jobs:
       - name: Upload final Windows ARM64 artifacts
         uses: actions/upload-artifact@v4
         with:
+          retention-days: 7
           name: jcode-windows-aarch64
           path: |
             dist/jcode-windows-aarch64.exe
@@ -496,6 +500,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
+          retention-days: 7
           name: jcode-freebsd-x86_64
           path: dist/jcode-freebsd-x86_64.tar.gz
 
